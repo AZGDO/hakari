@@ -1,5 +1,5 @@
 use crate::auth::copilot;
-use crate::config::HakariConfig;
+use crate::config::{HakariConfig, ModelCategory, ReasoningLevel};
 use crate::llm::client::LlmClient;
 use crate::memory::kkm::Kkm;
 use crate::memory::kms::Kms;
@@ -15,7 +15,7 @@ use crate::tui::theme::Theme;
 use crate::tui::widgets::header::{self, AuthDisplay, HeaderData};
 use crate::tui::widgets::input_bar::InputBar;
 use crate::tui::widgets::message_list::{ChatMessage, MessageList, MessageType};
-use crate::tui::widgets::popup::{ConnectState, ModelEntry, Popup, PopupType, SettingEntry};
+use crate::tui::widgets::popup::{ConnectState, ModelEntry, ModelListDisplay, ModelTarget, Popup, PopupType, SettingEntry};
 use crate::tui::widgets::progress::Spinner;
 use crate::tui::widgets::status_bar::{self, AgentStatus, StatusBarData};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -28,6 +28,13 @@ pub enum AppMode {
     Input,
     Scrolling,
     Popup,
+}
+
+enum PopupEnterAction {
+    SelectModel(String, ModelTarget),
+    SelectReasoning(String),
+    StartSettingsEdit,
+    Dismiss,
 }
 
 pub struct App {
@@ -51,7 +58,12 @@ pub struct App {
     pub connect_state: Option<copilot::DeviceFlowState>,
     pub connect_rx: Option<mpsc::UnboundedReceiver<ConnectEvent>>,
     pub model_rx: Option<mpsc::UnboundedReceiver<Vec<copilot::CopilotModel>>>,
+    pub usage_rx: Option<mpsc::UnboundedReceiver<copilot::CopilotUsage>>,
+    pub copilot_usage: Option<copilot::CopilotUsage>,
     pub tick_count: u64,
+    pub model_fetch_target: ModelTarget,
+    pub welcome_shown: bool,
+    pub reinstall_pending: bool,
 }
 
 #[derive(Debug)]
@@ -99,7 +111,12 @@ impl App {
             connect_state: None,
             connect_rx: None,
             model_rx: None,
+            usage_rx: None,
+            copilot_usage: None,
             tick_count: 0,
+            model_fetch_target: ModelTarget::Nano,
+            welcome_shown: false,
+            reinstall_pending: false,
         };
 
         if app.kpms.project.name.is_empty() {
@@ -108,27 +125,101 @@ impl App {
             let _ = app.kpms.save(&project_dir);
         }
 
-        app.message_list.add_message(ChatMessage {
-            msg_type: MessageType::System,
-            content: format!(
-                "Welcome to HAKARI -- {} ({})\nType a task or use / for commands, @ to mention files.",
-                app.kpms.project.name,
-                if app.kpms.project.language.is_empty() { "unknown" } else { &app.kpms.project.language }
-            ),
+        if copilot::is_authenticated() {
+            app.start_usage_fetch();
+        }
+
+        app
+    }
+
+    fn start_usage_fetch(&mut self) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.usage_rx = Some(rx);
+        tokio::spawn(async move {
+            if let Ok(usage) = copilot::fetch_usage().await {
+                let _ = tx.send(usage);
+            }
+        });
+    }
+
+    fn show_welcome(&mut self) {
+        if self.welcome_shown {
+            return;
+        }
+        self.welcome_shown = true;
+
+        let ascii_content = match std::fs::read_to_string("ascii.txt") {
+            Ok(content) => content,
+            Err(_) => "ASCII art not found.".to_string(),
+        };
+
+        let lines: Vec<String> = ascii_content.lines().map(|s| s.to_string()).collect();
+        let max_width = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+        let border_line = "─".repeat(max_width);
+        let enhanced_ascii = format!("┌{}┐\n", border_line) +
+            &lines.iter().map(|l| format!("│{}│\n", l)).collect::<String>() +
+            &format!("└{}┘", border_line);
+
+        self.message_list.add_message(ChatMessage {
+            msg_type: MessageType::Welcome,
+            content: enhanced_ascii,
             timestamp: None,
             collapsed: false,
         });
 
-        if !copilot::is_authenticated() && app.llm_client.is_none() {
-            app.message_list.add_message(ChatMessage {
+        let provider = if copilot::is_authenticated() {
+            "GitHub Copilot (connected)"
+        } else if self.config.openai_api_key.is_some() {
+            "OpenAI API Key"
+        } else if self.config.anthropic_api_key.is_some() {
+            "Anthropic API Key"
+        } else {
+            "not configured -- use /connect"
+        };
+
+        let mut info = format!(
+            "  {} v0.1.0 \u{2502} {} ({}) \u{2502} #{}\n",
+            "HAKARI",
+            self.kpms.project.name,
+            if self.kpms.project.language.is_empty() { "unknown" } else { &self.kpms.project.language },
+            &self.kms.session_id[..8],
+        );
+        info.push_str(&format!(
+            "  nano: {} [{}] reason={}\n",
+            self.config.nano_model, self.config.nano_category, self.config.nano_reasoning
+        ));
+        info.push_str(&format!(
+            "  shizuka: {} [{}]\n",
+            self.config.shizuka_model, self.config.shizuka_category
+        ));
+        info.push_str(&format!("  provider: {}\n", provider));
+
+        if let Some(ref usage) = self.copilot_usage {
+            if usage.limit > 0 {
+                info.push_str(&format!(
+                    "  copilot: {:.0}% left ({}/{})\n",
+                    usage.percent_left, usage.requests_left, usage.limit
+                ));
+            }
+        }
+
+        info.push_str("\n  Type a task, use / for commands, @ to mention files.");
+
+        self.message_list.add_message(ChatMessage {
+            msg_type: MessageType::System,
+            content: info,
+            timestamp: None,
+            collapsed: false,
+        });
+
+        if !copilot::is_authenticated() && self.llm_client.is_none() {
+            self.message_list.add_message(ChatMessage {
                 msg_type: MessageType::System,
-                content: "Use /connect to authenticate with GitHub Copilot, or set OPENAI_API_KEY / ANTHROPIC_API_KEY.".to_string(),
+                content: "  Use /connect to authenticate, or set OPENAI_API_KEY / ANTHROPIC_API_KEY.".to_string(),
                 timestamp: None,
                 collapsed: false,
             });
         }
-
-        app
     }
 
     pub fn handle_event(&mut self, event: AppEvent) {
@@ -158,13 +249,11 @@ impl App {
             return;
         }
 
-        // Copy
         if event::is_copy(&key) {
             self.do_copy();
             return;
         }
 
-        // Paste
         if event::is_paste(&key) {
             self.do_paste();
             return;
@@ -178,6 +267,68 @@ impl App {
     }
 
     fn handle_popup_key(&mut self, key: crossterm::event::KeyEvent) {
+        // If settings popup is in edit mode, route all keys to the editor
+        if let Some(ref popup) = self.popup {
+            if popup.settings_is_editing() {
+                match key.code {
+                    KeyCode::Enter => {
+                        if let Some(popup) = &mut self.popup {
+                            if let Some((k, v)) = popup.settings_commit_edit() {
+                                self.apply_setting(&k, &v);
+                            }
+                        }
+                    }
+                    KeyCode::Esc => {
+                        if let Some(popup) = &mut self.popup {
+                            popup.settings_cancel_edit();
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if let Some(popup) = &mut self.popup {
+                            popup.settings_edit_backspace();
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        if let Some(popup) = &mut self.popup {
+                            popup.settings_edit_push(c);
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+        }
+
+        // Handle connect menu enter first
+        if let Some(ref popup) = self.popup {
+            if matches!(popup.popup_type, PopupType::ConnectMenu { .. }) {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.popup = None;
+                        self.mode = AppMode::Input;
+                        return;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if let Some(ref mut popup) = self.popup {
+                            popup.select_up();
+                        }
+                        return;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if let Some(ref mut popup) = self.popup {
+                            popup.select_down();
+                        }
+                        return;
+                    }
+                    KeyCode::Enter => {
+                        self.handle_connect_menu_enter();
+                        return;
+                    }
+                    _ => return,
+                }
+            }
+        }
+
         match key.code {
             KeyCode::Esc => {
                 self.popup = None;
@@ -217,32 +368,109 @@ impl App {
         }
     }
 
-    fn handle_popup_enter(&mut self) {
-        let selected_model = if let Some(ref popup) = self.popup {
-            if let PopupType::ModelSelector { models, selected, .. } = &popup.popup_type {
-                models.get(*selected).map(|m| m.id.clone())
+    fn handle_connect_menu_enter(&mut self) {
+        let selected = if let Some(ref popup) = self.popup {
+            if let PopupType::ConnectMenu { selected } = &popup.popup_type {
+                *selected
             } else {
-                None
+                return;
+            }
+        } else {
+            return;
+        };
+
+        match selected {
+            0 => {
+                self.popup = None;
+                self.start_connect_flow();
+            }
+            1 => {
+                self.popup = None;
+                self.mode = AppMode::Input;
+                self.message_list.add_message(ChatMessage {
+                    msg_type: MessageType::System,
+                    content: "  Set OPENAI_API_KEY and optionally OPENAI_BASE_URL.\n  Restart HAKARI after setting.".to_string(),
+                    timestamp: None,
+                    collapsed: false,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_popup_enter(&mut self) {
+        let action = if let Some(ref popup) = self.popup {
+            match &popup.popup_type {
+                PopupType::ModelSelector { models, selected, target, .. } => {
+                    models.get(*selected).map(|m| PopupEnterAction::SelectModel(m.id.clone(), target.clone()))
+                }
+                PopupType::ReasoningSelector { levels, selected } => {
+                    levels.get(*selected).map(|l| PopupEnterAction::SelectReasoning(l.clone()))
+                }
+                PopupType::Help | PopupType::ModelList { .. }
+                | PopupType::Escalation { .. } | PopupType::ConnectFlow { .. } => {
+                    Some(PopupEnterAction::Dismiss)
+                }
+                PopupType::Settings { .. } => {
+                    Some(PopupEnterAction::StartSettingsEdit)
+                }
+                _ => None,
             }
         } else {
             None
         };
 
-        if let Some(model_id) = selected_model {
-            self.set_model(&model_id);
-            self.popup = None;
-            self.mode = AppMode::Input;
-            self.message_list.add_message(ChatMessage {
-                msg_type: MessageType::System,
-                content: format!("Model set to: {}", model_id),
-                timestamp: None,
-                collapsed: false,
-            });
+        match action {
+            Some(PopupEnterAction::SelectModel(model_id, target)) => {
+                match target {
+                    ModelTarget::Nano => {
+                        self.set_model(&model_id);
+                        self.message_list.add_message(ChatMessage {
+                            msg_type: MessageType::System,
+                            content: format!("  Nano model set to: {}", model_id),
+                            timestamp: None,
+                            collapsed: false,
+                        });
+                    }
+                    ModelTarget::Shizuka => {
+                        self.set_shizuka_model(&model_id);
+                        self.message_list.add_message(ChatMessage {
+                            msg_type: MessageType::System,
+                            content: format!("  Shizuka model set to: {}", model_id),
+                            timestamp: None,
+                            collapsed: false,
+                        });
+                    }
+                }
+                self.popup = None;
+                self.mode = AppMode::Input;
+            }
+            Some(PopupEnterAction::SelectReasoning(level)) => {
+                self.set_reasoning(&level);
+                self.message_list.add_message(ChatMessage {
+                    msg_type: MessageType::System,
+                    content: format!("  Reasoning set to: {}", level),
+                    timestamp: None,
+                    collapsed: false,
+                });
+                self.popup = None;
+                self.mode = AppMode::Input;
+            }
+            Some(PopupEnterAction::StartSettingsEdit) => {
+                if let Some(ref mut popup) = self.popup {
+                    popup.settings_start_edit();
+                }
+            }
+            Some(PopupEnterAction::Dismiss) => {
+                self.popup = None;
+                self.connect_polling = false;
+                self.mode = AppMode::Input;
+            }
+            None => {}
         }
     }
 
     fn handle_input_key(&mut self, key: crossterm::event::KeyEvent) {
-        // Suggestion navigation
         if self.input_bar.has_suggestions() {
             match key.code {
                 KeyCode::Tab | KeyCode::Enter if self.input_bar.has_suggestions() && key.code == KeyCode::Tab => {
@@ -264,7 +492,6 @@ impl App {
         match key.code {
             KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                 if self.input_bar.has_suggestions() {
-                    // If suggestions shown and user presses enter on a slash command, accept it
                     if !self.input_bar.slash_suggestions.is_empty() {
                         self.input_bar.accept_suggestion();
                         return;
@@ -312,7 +539,6 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.input_bar.insert_char(c);
-                // Update file suggestions after typing @
                 self.input_bar.update_file_suggestions(&self.project_dir);
             }
             _ => {}
@@ -355,6 +581,12 @@ impl App {
 
     fn handle_tick(&mut self) {
         self.tick_count += 1;
+
+        // Show welcome on first tick so usage data can load
+        if !self.welcome_shown && self.tick_count >= 3 {
+            self.show_welcome();
+        }
+
         if self.agent_running {
             self.spinner.tick();
         }
@@ -362,6 +594,7 @@ impl App {
         self.process_agent_events();
         self.process_connect_events();
         self.process_model_events();
+        self.process_usage_events();
     }
 
     fn process_agent_events(&mut self) {
@@ -479,8 +712,8 @@ impl App {
                             state: ConnectState::Success,
                         };
                     }
-                    // Rebuild LLM client with copilot
                     self.rebuild_llm_client();
+                    self.start_usage_fetch();
                 }
                 ConnectEvent::Error(e) => {
                     self.connect_polling = false;
@@ -498,28 +731,42 @@ impl App {
     fn process_model_events(&mut self) {
         if let Some(ref mut rx) = self.model_rx {
             if let Ok(models) = rx.try_recv() {
+                let current = match self.model_fetch_target {
+                    ModelTarget::Nano => &self.config.nano_model,
+                    ModelTarget::Shizuka => &self.config.shizuka_model,
+                };
                 let entries: Vec<ModelEntry> = models.iter().map(|m| ModelEntry {
                     id: m.id.clone(),
                     name: m.name.clone(),
                     reasoning: m.reasoning,
                     context: m.limit.as_ref().map(|l| l.context).unwrap_or(0),
-                    active: m.id == self.config.nano_model,
+                    active: m.id == *current,
+                    input_rate: m.input_rate,
+                    output_rate: m.output_rate,
+                    category: categorize_model(&m.id),
                 }).collect();
-                self.popup = Some(Popup::model_selector(entries, &self.config.nano_model));
+                self.popup = Some(Popup::model_selector(entries, current, self.model_fetch_target.clone()));
                 self.mode = AppMode::Popup;
                 self.model_rx = None;
             }
         }
     }
 
+    fn process_usage_events(&mut self) {
+        if let Some(ref mut rx) = self.usage_rx {
+            if let Ok(usage) = rx.try_recv() {
+                self.copilot_usage = Some(usage);
+                self.usage_rx = None;
+            }
+        }
+    }
+
     fn process_input(&mut self, input: String) {
-        // Check if it's a slash command
         if let Some((cmd, args)) = commands::parse_command(&input) {
             self.execute_command(cmd, args);
             return;
         }
 
-        // Extract @mentions for file pinning
         let mentions = commands::extract_at_mentions(&input);
         for mention in &mentions {
             self.input_bar.pin_file(mention);
@@ -539,7 +786,7 @@ impl App {
                 self.message_list.scroll_offset = 0;
                 self.message_list.add_message(ChatMessage {
                     msg_type: MessageType::System,
-                    content: "Chat cleared.".to_string(),
+                    content: "  Chat cleared.".to_string(),
                     timestamp: None,
                     collapsed: false,
                 });
@@ -548,31 +795,51 @@ impl App {
                 self.message_list.collapse_all_traces();
                 self.message_list.add_message(ChatMessage {
                     msg_type: MessageType::System,
-                    content: "All thinking/traces collapsed.".to_string(),
+                    content: "  All traces collapsed.".to_string(),
                     timestamp: None,
                     collapsed: false,
                 });
             }
             "/model" | "/models" => {
-                self.show_model_selector(args);
+                self.show_model_selector(args, ModelTarget::Nano);
+            }
+            "/shizuka" => {
+                self.show_model_selector(args, ModelTarget::Shizuka);
+            }
+            "/reasoning" => {
+                self.show_reasoning_selector(args);
+            }
+            "/modellist" => {
+                self.show_model_list();
             }
             "/connect" => {
-                self.start_connect_flow();
+                self.popup = Some(Popup::connect_menu());
+                self.mode = AppMode::Popup;
             }
             "/settings" => {
                 self.show_settings();
             }
             "/status" => {
                 let auth = if copilot::is_authenticated() { "connected" } else { "not connected" };
-                let status = format!(
-                    "Session: {}\nModel: {}\nAuth: {}\nSteps: {}\nFiles modified: {}\nPinned: {}",
+                let mut status = format!(
+                    "  Session: #{}\n  Nano: {} [{}] reason={}\n  Shizuka: {} [{}]\n  Auth: {}\n  Steps: {}\n  Files modified: {}\n  Pinned: {}",
                     &self.kms.session_id[..8],
                     self.config.nano_model,
+                    self.config.nano_category,
+                    self.config.nano_reasoning,
+                    self.config.shizuka_model,
+                    self.config.shizuka_category,
                     auth,
                     self.kms.steps.current,
                     self.kms.files.index.values().filter(|f| f.is_modified).count(),
                     self.input_bar.pinned_files.join(", "),
                 );
+                if let Some(ref usage) = self.copilot_usage {
+                    if usage.limit > 0 {
+                        status.push_str(&format!("\n  Copilot: {:.0}% left ({}/{})",
+                            usage.percent_left, usage.requests_left, usage.limit));
+                    }
+                }
                 self.message_list.add_message(ChatMessage {
                     msg_type: MessageType::System,
                     content: status,
@@ -588,7 +855,7 @@ impl App {
                 self.status.classification = None;
                 self.message_list.add_message(ChatMessage {
                     msg_type: MessageType::System,
-                    content: "Session memory reset.".to_string(),
+                    content: "  Session reset.".to_string(),
                     timestamp: None,
                     collapsed: false,
                 });
@@ -601,14 +868,14 @@ impl App {
                         self.input_bar.pin_file(file);
                         self.message_list.add_message(ChatMessage {
                             msg_type: MessageType::System,
-                            content: format!("Pinned: @{}", file),
+                            content: format!("  Pinned: @{}", file),
                             timestamp: None,
                             collapsed: false,
                         });
                     } else {
                         self.message_list.add_message(ChatMessage {
                             msg_type: MessageType::Warning,
-                            content: format!("File not found: {}", file),
+                            content: format!("  File not found: {}", file),
                             timestamp: None,
                             collapsed: false,
                         });
@@ -620,7 +887,7 @@ impl App {
                 self.input_bar.unpin_file(file);
                 self.message_list.add_message(ChatMessage {
                     msg_type: MessageType::System,
-                    content: format!("Unpinned: @{}", file),
+                    content: format!("  Unpinned: @{}", file),
                     timestamp: None,
                     collapsed: false,
                 });
@@ -629,18 +896,18 @@ impl App {
                 if self.input_bar.pinned_files.is_empty() {
                     self.message_list.add_message(ChatMessage {
                         msg_type: MessageType::System,
-                        content: "No pinned files. Use @filename to pin.".to_string(),
+                        content: "  No pinned files. Use @filename to pin.".to_string(),
                         timestamp: None,
                         collapsed: false,
                     });
                 } else {
                     let list = self.input_bar.pinned_files.iter()
-                        .map(|f| format!("  @{}", f))
+                        .map(|f| format!("    @{}", f))
                         .collect::<Vec<_>>()
                         .join("\n");
                     self.message_list.add_message(ChatMessage {
                         msg_type: MessageType::System,
-                        content: format!("Pinned files:\n{}", list),
+                        content: format!("  Pinned files:\n{}", list),
                         timestamp: None,
                         collapsed: false,
                     });
@@ -649,19 +916,19 @@ impl App {
             "/diff" => {
                 let diffs: Vec<String> = self.kms.files.index.iter()
                     .filter(|(_, info)| info.is_modified)
-                    .map(|(path, _)| format!("  M {}", path))
+                    .map(|(path, _)| format!("    M {}", path))
                     .collect();
                 if diffs.is_empty() {
                     self.message_list.add_message(ChatMessage {
                         msg_type: MessageType::System,
-                        content: "No files modified this session.".to_string(),
+                        content: "  No files modified this session.".to_string(),
                         timestamp: None,
                         collapsed: false,
                     });
                 } else {
                     self.message_list.add_message(ChatMessage {
                         msg_type: MessageType::System,
-                        content: format!("Modified files:\n{}", diffs.join("\n")),
+                        content: format!("  Modified files:\n{}", diffs.join("\n")),
                         timestamp: None,
                         collapsed: false,
                     });
@@ -672,7 +939,7 @@ impl App {
                 if undone.is_empty() {
                     self.message_list.add_message(ChatMessage {
                         msg_type: MessageType::System,
-                        content: "Nothing to undo.".to_string(),
+                        content: "  Nothing to undo.".to_string(),
                         timestamp: None,
                         collapsed: false,
                     });
@@ -683,7 +950,7 @@ impl App {
                     }
                     self.message_list.add_message(ChatMessage {
                         msg_type: MessageType::System,
-                        content: format!("Restored {} file(s).", undone.len()),
+                        content: format!("  Restored {} file(s).", undone.len()),
                         timestamp: None,
                         collapsed: false,
                     });
@@ -693,7 +960,7 @@ impl App {
                 self.message_list.add_message(ChatMessage {
                     msg_type: MessageType::System,
                     content: format!(
-                        "Token usage:\n  Context: ~{} tokens\n  Steps: {}",
+                        "  Context: ~{} tokens\n  Steps: {}",
                         self.kms.context.total_tokens_estimate,
                         self.kms.steps.current,
                     ),
@@ -711,7 +978,7 @@ impl App {
                     Ok(_) => {
                         self.message_list.add_message(ChatMessage {
                             msg_type: MessageType::System,
-                            content: format!("Chat exported to {}", path),
+                            content: format!("  Exported to {}", path),
                             timestamp: None,
                             collapsed: false,
                         });
@@ -719,20 +986,30 @@ impl App {
                     Err(e) => {
                         self.message_list.add_message(ChatMessage {
                             msg_type: MessageType::Error,
-                            content: format!("Export failed: {}", e),
+                            content: format!("  Export failed: {}", e),
                             timestamp: None,
                             collapsed: false,
                         });
                     }
                 }
             }
-            "/quit" => {
+            "/reinstall" => {
+                self.message_list.add_message(ChatMessage {
+                    msg_type: MessageType::System,
+                    content: "  Reinstalling hakari...".to_string(),
+                    timestamp: None,
+                    collapsed: false,
+                });
+                self.reinstall_pending = true;
+                self.running = false;
+            }
+            "/exit" | "/quit" => {
                 self.running = false;
             }
             _ => {
                 self.message_list.add_message(ChatMessage {
                     msg_type: MessageType::Warning,
-                    content: format!("Unknown command: {}. Type /help for available commands.", cmd),
+                    content: format!("  Unknown command: {}. Type /help for commands.", cmd),
                     timestamp: None,
                     collapsed: false,
                 });
@@ -740,19 +1017,33 @@ impl App {
         }
     }
 
-    fn show_model_selector(&mut self, args: &str) {
+    fn show_model_selector(&mut self, args: &str, target: ModelTarget) {
         if !args.is_empty() {
-            self.set_model(args);
-            self.message_list.add_message(ChatMessage {
-                msg_type: MessageType::System,
-                content: format!("Model set to: {}", args),
-                timestamp: None,
-                collapsed: false,
-            });
+            match target {
+                ModelTarget::Nano => {
+                    self.set_model(args);
+                    self.message_list.add_message(ChatMessage {
+                        msg_type: MessageType::System,
+                        content: format!("  Nano model set to: {}", args),
+                        timestamp: None,
+                        collapsed: false,
+                    });
+                }
+                ModelTarget::Shizuka => {
+                    self.set_shizuka_model(args);
+                    self.message_list.add_message(ChatMessage {
+                        msg_type: MessageType::System,
+                        content: format!("  Shizuka model set to: {}", args),
+                        timestamp: None,
+                        collapsed: false,
+                    });
+                }
+            }
             return;
         }
 
-        self.popup = Some(Popup::model_selector_loading());
+        self.model_fetch_target = target.clone();
+        self.popup = Some(Popup::model_selector_loading(target));
         self.mode = AppMode::Popup;
 
         let (tx, rx) = mpsc::unbounded_channel();
@@ -769,6 +1060,58 @@ impl App {
         });
     }
 
+    fn show_reasoning_selector(&mut self, args: &str) {
+        if !args.is_empty() {
+            self.set_reasoning(args);
+            self.message_list.add_message(ChatMessage {
+                msg_type: MessageType::System,
+                content: format!("  Reasoning set to: {}", args),
+                timestamp: None,
+                collapsed: false,
+            });
+            return;
+        }
+
+        let levels = vec![
+            "none".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+        ];
+        self.popup = Some(Popup::reasoning_selector(levels, &self.config.nano_reasoning.to_string()));
+        self.mode = AppMode::Popup;
+    }
+
+    fn show_model_list(&mut self) {
+        let mut entries: Vec<ModelListDisplay> = Vec::new();
+
+        entries.push(ModelListDisplay {
+            demand: "Nano (agent)".to_string(),
+            model_id: self.config.nano_model.clone(),
+            category: self.config.nano_category.to_string(),
+            reasoning: self.config.nano_reasoning.to_string(),
+        });
+        entries.push(ModelListDisplay {
+            demand: "Shizuka (prep)".to_string(),
+            model_id: self.config.shizuka_model.clone(),
+            category: self.config.shizuka_category.to_string(),
+            reasoning: "n/a".to_string(),
+        });
+
+        for entry in &self.config.model_list {
+            entries.push(ModelListDisplay {
+                demand: entry.demand.clone(),
+                model_id: entry.model_id.clone(),
+                category: entry.category.to_string(),
+                reasoning: entry.reasoning.to_string(),
+            });
+        }
+
+        self.popup = Some(Popup::model_list(entries));
+        self.mode = AppMode::Popup;
+    }
+
     fn show_settings(&mut self) {
         let entries = vec![
             SettingEntry {
@@ -778,9 +1121,27 @@ impl App {
                 editable: true,
             },
             SettingEntry {
+                key: "nano_category".to_string(),
+                label: "Nano Category".to_string(),
+                value: self.config.nano_category.to_string(),
+                editable: true,
+            },
+            SettingEntry {
+                key: "nano_reasoning".to_string(),
+                label: "Nano Reasoning".to_string(),
+                value: self.config.nano_reasoning.to_string(),
+                editable: true,
+            },
+            SettingEntry {
                 key: "shizuka_model".to_string(),
                 label: "Shizuka Model".to_string(),
                 value: self.config.shizuka_model.clone(),
+                editable: true,
+            },
+            SettingEntry {
+                key: "shizuka_category".to_string(),
+                label: "Shizuka Category".to_string(),
+                value: self.config.shizuka_category.to_string(),
                 editable: true,
             },
             SettingEntry {
@@ -791,7 +1152,7 @@ impl App {
             },
             SettingEntry {
                 key: "max_context".to_string(),
-                label: "Max Context Tokens".to_string(),
+                label: "Max Context".to_string(),
                 value: format!("{}", self.config.max_context_tokens),
                 editable: true,
             },
@@ -799,6 +1160,15 @@ impl App {
                 key: "auth".to_string(),
                 label: "GitHub Copilot".to_string(),
                 value: if copilot::is_authenticated() { "Connected".to_string() } else { "Not connected".to_string() },
+                editable: false,
+            },
+            SettingEntry {
+                key: "copilot_usage".to_string(),
+                label: "Copilot Usage".to_string(),
+                value: match &self.copilot_usage {
+                    Some(u) if u.limit > 0 => format!("{:.0}% left ({}/{})", u.percent_left, u.requests_left, u.limit),
+                    _ => "N/A".to_string(),
+                },
                 editable: false,
             },
             SettingEntry {
@@ -830,7 +1200,6 @@ impl App {
             match copilot::start_device_flow().await {
                 Ok(state) => {
                     let _ = tx.send(ConnectEvent::FlowStarted(state.clone()));
-                    // Poll for token
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(state.interval + 2)).await;
                         match copilot::poll_for_token(&state).await {
@@ -855,21 +1224,68 @@ impl App {
         });
     }
 
+    fn apply_setting(&mut self, key: &str, value: &str) {
+        match key {
+            "nano_model" => self.set_model(value),
+            "nano_reasoning" => self.set_reasoning(value),
+            "shizuka_model" => self.set_shizuka_model(value),
+            "nano_category" => {
+                let mut config = (*self.config).clone();
+                config.nano_category = parse_model_category(value);
+                self.config = Arc::new(config);
+            }
+            "shizuka_category" => {
+                let mut config = (*self.config).clone();
+                config.shizuka_category = parse_model_category(value);
+                self.config = Arc::new(config);
+            }
+            "max_context" => {
+                if let Ok(n) = value.parse::<usize>() {
+                    let mut config = (*self.config).clone();
+                    config.max_context_tokens = n;
+                    self.config = Arc::new(config);
+                }
+            }
+            _ => {}
+        }
+        self.rebuild_llm_client();
+    }
+
     fn set_model(&mut self, model_id: &str) {
         let mut config = (*self.config).clone();
         config.nano_model = model_id.to_string();
+        config.nano_category = parse_model_category(model_id);
+        config.nano_reasoning = ReasoningLevel::default_for_model(model_id);
         self.config = Arc::new(config);
         self.rebuild_llm_client();
     }
 
+    fn set_shizuka_model(&mut self, model_id: &str) {
+        let mut config = (*self.config).clone();
+        config.shizuka_model = model_id.to_string();
+        config.shizuka_category = parse_model_category(model_id);
+        self.config = Arc::new(config);
+        self.rebuild_llm_client();
+    }
+
+    fn set_reasoning(&mut self, level: &str) {
+        let mut config = (*self.config).clone();
+        config.nano_reasoning = match level {
+            "none" => ReasoningLevel::None,
+            "low" => ReasoningLevel::Low,
+            "medium" => ReasoningLevel::Medium,
+            "high" => ReasoningLevel::High,
+            "xhigh" => ReasoningLevel::XHigh,
+            _ => ReasoningLevel::High,
+        };
+        self.config = Arc::new(config);
+    }
+
     fn rebuild_llm_client(&mut self) {
-        // Try to rebuild with copilot token if available
         let mut config = (*self.config).clone();
         if let Some(token) = copilot::get_token() {
             let base = copilot::copilot_base_url();
             config.openai_api_key = Some(token.clone());
-            config.openai_base_url = format!("{}/chat/completions", base).replace("/chat/completions", "");
-            // Set to copilot endpoint
             config.openai_base_url = base.clone();
         }
         self.config = Arc::new(config);
@@ -898,14 +1314,13 @@ impl App {
         if self.agent_running {
             self.message_list.add_message(ChatMessage {
                 msg_type: MessageType::Warning,
-                content: "Agent is currently running. Please wait.".to_string(),
+                content: "  Agent is running. Please wait.".to_string(),
                 timestamp: None,
                 collapsed: false,
             });
             return;
         }
 
-        // Rebuild client if needed (e.g., just connected)
         if self.llm_client.is_none() {
             self.rebuild_llm_client();
         }
@@ -913,7 +1328,7 @@ impl App {
         let Some(ref llm_client) = self.llm_client else {
             self.message_list.add_message(ChatMessage {
                 msg_type: MessageType::Error,
-                content: "No LLM configured. Use /connect or set API keys.".to_string(),
+                content: "  No LLM configured. Use /connect or set API keys.".to_string(),
                 timestamp: None,
                 collapsed: false,
             });
@@ -944,6 +1359,7 @@ impl App {
         let pinned = self.input_bar.pinned_files.clone();
 
         tokio::spawn(async move {
+            // Single shizuka request: try fast path first, only call shizuka if needed
             let mut prep = if let Some(fast) = preparation::try_fast_path(&prompt, &project_dir) {
                 fast
             } else {
@@ -956,7 +1372,6 @@ impl App {
                 }
             };
 
-            // Add pinned files to preload
             for file in &pinned {
                 if !prep.files_to_preload.contains(file) {
                     prep.files_to_preload.push(file.clone());
@@ -974,6 +1389,7 @@ impl App {
                 });
             }
 
+            // Single nano agent run per prompt
             let agent = NanoAgent::new(config, llm_client, project_dir, 0);
             match agent.run(&prep, &mut kms, &kpms, &kkm, event_tx.clone()).await {
                 Ok(_) => {}
@@ -1021,7 +1437,11 @@ impl App {
                 has_kpms: !self.kpms.learnings.is_empty() || !self.kpms.file_index.is_empty(),
                 has_kkm: !self.kkm.tools.is_empty(),
                 model_name: self.config.nano_model.clone(),
+                model_category: self.config.nano_category.to_string(),
+                reasoning: self.config.nano_reasoning.to_string(),
+                shizuka_model: self.config.shizuka_model.clone(),
                 auth_status: auth_display,
+                copilot_usage: self.copilot_usage.clone(),
             },
         );
 
@@ -1034,9 +1454,37 @@ impl App {
         // Status bar
         status_bar::render_status_bar(frame, layout.status, &self.status);
 
-        // Popup overlay (last, on top of everything)
+        // Popup overlay
         if let Some(ref popup) = self.popup {
             popup.render(frame, area);
         }
+    }
+}
+
+fn categorize_model(model_id: &str) -> String {
+    let lower = model_id.to_lowercase();
+    if lower.contains("mini") || lower.contains("lite") || lower.contains("flash") || lower.contains("haiku") {
+        "Light".to_string()
+    } else if lower.contains("nano") || lower.contains("small") {
+        "Light".to_string()
+    } else if lower.contains("pro") || lower.contains("medium") {
+        "Medium".to_string()
+    } else if lower.contains("max") || lower.contains("opus") || lower.contains("o1") || lower.contains("o3") || lower.contains("o4") {
+        "Max".to_string()
+    } else {
+        "High".to_string()
+    }
+}
+
+fn parse_model_category(model_id: &str) -> ModelCategory {
+    let lower = model_id.to_lowercase();
+    if lower.contains("mini") || lower.contains("lite") || lower.contains("flash") || lower.contains("haiku") || lower.contains("nano") || lower.contains("small") {
+        ModelCategory::Light
+    } else if lower.contains("pro") || lower.contains("medium") {
+        ModelCategory::Medium
+    } else if lower.contains("max") || lower.contains("opus") || lower.contains("o1") || lower.contains("o3") || lower.contains("o4") {
+        ModelCategory::Max
+    } else {
+        ModelCategory::High
     }
 }

@@ -1,5 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
+use crate::auth::copilot::CopilotUsage;
 use crate::tui::theme::Theme;
 
 pub struct HeaderData {
@@ -8,7 +9,11 @@ pub struct HeaderData {
     pub has_kpms: bool,
     pub has_kkm: bool,
     pub model_name: String,
+    pub model_category: String,
+    pub reasoning: String,
+    pub shizuka_model: String,
     pub auth_status: AuthDisplay,
+    pub copilot_usage: Option<CopilotUsage>,
 }
 
 #[derive(Debug, Clone)]
@@ -19,73 +24,132 @@ pub enum AuthDisplay {
 }
 
 pub fn render_header(frame: &mut Frame, area: Rect, data: &HeaderData) {
-    let mut spans = Vec::new();
+    let bg = Theme::surface();
 
-    spans.push(Span::styled(
+    // Line 1: branding + project + auth
+    let mut line1_spans = Vec::new();
+
+    line1_spans.push(Span::styled(
         " HAKARI ",
-        Style::default().fg(Theme::mauve()).add_modifier(Modifier::BOLD),
+        Style::default().fg(Theme::mauve()).bg(bg).add_modifier(Modifier::BOLD),
     ));
-    spans.push(Span::styled(" │ ", Style::default().fg(Theme::border())));
 
-    spans.push(Span::styled(
-        data.project_name.to_string(),
-        Style::default().fg(Theme::text()),
+    line1_spans.push(Span::styled(
+        format!(" {} ", data.project_name),
+        Style::default().fg(Theme::text()).bg(bg),
     ));
-    spans.push(Span::styled(" │ ", Style::default().fg(Theme::border())));
 
-    if !data.model_name.is_empty() {
-        spans.push(Span::styled(
-            data.model_name.to_string(),
-            Style::default().fg(Theme::cyan()),
-        ));
-        spans.push(Span::styled(" │ ", Style::default().fg(Theme::border())));
+    line1_spans.push(Span::styled(
+        format!("#{} ", &data.session_id[..data.session_id.len().min(8)]),
+        Style::default().fg(Theme::text_muted()).bg(bg),
+    ));
+
+    // Right side of line 1
+    let mut right1 = Vec::new();
+
+    if let Some(ref usage) = data.copilot_usage {
+        if usage.limit > 0 {
+            let color = if usage.percent_left > 50.0 {
+                Theme::green()
+            } else if usage.percent_left > 20.0 {
+                Theme::yellow()
+            } else {
+                Theme::red()
+            };
+            let bar_width: usize = 8;
+            let filled = ((usage.percent_left / 100.0) * bar_width as f64).round() as usize;
+            let empty = bar_width.saturating_sub(filled);
+            right1.push(Span::styled(
+                format!("{}/{} ", usage.requests_left, usage.limit),
+                Style::default().fg(color).bg(bg),
+            ));
+            right1.push(Span::styled(
+                "\u{2588}".repeat(filled),
+                Style::default().fg(color).bg(bg),
+            ));
+            right1.push(Span::styled(
+                "\u{2591}".repeat(empty),
+                Style::default().fg(Theme::text_muted()).bg(bg),
+            ));
+            right1.push(Span::styled(" ", Style::default().bg(bg)));
+        }
     }
 
-    let short_session = if data.session_id.len() > 8 {
-        &data.session_id[..8]
-    } else {
-        &data.session_id
-    };
-    spans.push(Span::styled(
-        format!("{}", short_session),
-        Theme::label(),
-    ));
-
-    let mut right_spans = Vec::new();
-
     match &data.auth_status {
-        AuthDisplay::Connected(preview) => {
-            right_spans.push(Span::styled(
-                format!(" ● {} ", preview),
-                Style::default().fg(Theme::green()),
+        AuthDisplay::Connected(_) => {
+            right1.push(Span::styled(
+                " connected ",
+                Style::default().fg(Theme::green()).bg(bg),
             ));
         }
         AuthDisplay::NotConnected => {
-            right_spans.push(Span::styled(
-                " ○ /connect ",
-                Style::default().fg(Theme::text_dim()),
+            right1.push(Span::styled(
+                " /connect ",
+                Style::default().fg(Theme::text_muted()).bg(bg),
             ));
         }
         AuthDisplay::None => {}
     }
 
-    right_spans.push(Span::styled("│", Style::default().fg(Theme::border())));
-
     if data.has_kpms {
-        right_spans.push(Span::styled(" KPMS", Style::default().fg(Theme::green())));
-    } else {
-        right_spans.push(Span::styled(" KPMS", Theme::label()));
+        right1.push(Span::styled("KPMS ", Style::default().fg(Theme::green()).bg(bg)));
     }
-    right_spans.push(Span::styled(" ", Style::default()));
 
-    let left_width: usize = spans.iter().map(|s| s.width()).sum();
-    let right_width: usize = right_spans.iter().map(|s| s.width()).sum();
-    let padding = (area.width as usize).saturating_sub(left_width + right_width);
+    let left1_width: usize = line1_spans.iter().map(|s| s.width()).sum();
+    let right1_width: usize = right1.iter().map(|s| s.width()).sum();
+    let pad1 = (area.width as usize).saturating_sub(left1_width + right1_width);
+    line1_spans.push(Span::styled(" ".repeat(pad1), Style::default().bg(bg)));
+    line1_spans.extend(right1);
 
-    spans.push(Span::raw(" ".repeat(padding)));
-    spans.extend(right_spans);
+    // Line 2: model info bar (subtle)
+    let mut line2_spans = Vec::new();
+    let dim_bg = Theme::surface();
 
-    let line = Line::from(spans);
-    let paragraph = Paragraph::new(line).style(Theme::header());
+    let cat_color = match data.model_category.as_str() {
+        "Max" => Theme::red(),
+        "High" => Theme::peach(),
+        "Medium" => Theme::blue(),
+        "Light" => Theme::green(),
+        _ => Theme::text_dim(),
+    };
+
+    line2_spans.push(Span::styled(" nano ", Style::default().fg(Theme::text_dim()).bg(dim_bg)));
+    line2_spans.push(Span::styled(
+        format!("{}", data.model_name),
+        Style::default().fg(Theme::lavender()).bg(dim_bg),
+    ));
+    line2_spans.push(Span::styled(
+        format!(" [{}]", data.model_category),
+        Style::default().fg(cat_color).bg(dim_bg),
+    ));
+
+    if !data.reasoning.is_empty() && data.reasoning != "none" {
+        line2_spans.push(Span::styled(
+            format!(" reason:{}", data.reasoning),
+            Style::default().fg(Theme::text_muted()).bg(dim_bg),
+        ));
+    }
+
+    line2_spans.push(Span::styled(
+        "  \u{2502}  ",
+        Style::default().fg(Theme::border()).bg(dim_bg),
+    ));
+
+    line2_spans.push(Span::styled("shizuka ", Style::default().fg(Theme::text_dim()).bg(dim_bg)));
+    line2_spans.push(Span::styled(
+        format!("{}", data.shizuka_model),
+        Style::default().fg(Theme::cyan()).bg(dim_bg),
+    ));
+
+    let left2_width: usize = line2_spans.iter().map(|s| s.width()).sum();
+    let pad2 = (area.width as usize).saturating_sub(left2_width);
+    line2_spans.push(Span::styled(" ".repeat(pad2), Style::default().bg(dim_bg)));
+
+    let lines = vec![
+        Line::from(line1_spans),
+        Line::from(line2_spans),
+    ];
+
+    let paragraph = Paragraph::new(lines).style(Style::default().bg(bg));
     frame.render_widget(paragraph, area);
 }

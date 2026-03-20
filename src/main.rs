@@ -55,5 +55,37 @@ async fn main() -> anyhow::Result<()> {
 
     tui::terminal::restore(&mut terminal)?;
 
+    if app.reinstall_pending {
+        // Determine source directory: walk up from current executable or use cwd
+        let src_dir = locate_hakari_src();
+        println!("Reinstalling hakari from {}...", src_dir.display());
+        let status = std::process::Command::new("cargo")
+            .arg("install")
+            .arg("--path")
+            .arg(&src_dir)
+            .arg("--force")
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("hakari reinstalled successfully."),
+            Ok(s) => eprintln!("cargo install exited with: {}", s),
+            Err(e) => eprintln!("Failed to run cargo install: {}", e),
+        }
+    }
+
     Ok(())
+}
+
+fn locate_hakari_src() -> std::path::PathBuf {
+    // Check if current exe is inside a cargo target dir — walk up to find Cargo.toml
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.as_path();
+        while let Some(parent) = dir.parent() {
+            if parent.join("Cargo.toml").exists() {
+                return parent.to_path_buf();
+            }
+            dir = parent;
+        }
+    }
+    // Fall back to cwd
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }

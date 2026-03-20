@@ -9,15 +9,18 @@ pub struct OpenAiProvider {
     api_key: String,
     base_url: String,
     model: String,
+    is_copilot: bool,
 }
 
 impl OpenAiProvider {
     pub fn new(api_key: String, base_url: String, model: String) -> Self {
+        let is_copilot = base_url.contains("githubcopilot.com");
         Self {
             client: Client::new(),
             api_key,
             base_url,
             model,
+            is_copilot,
         }
     }
 
@@ -67,13 +70,16 @@ impl OpenAiProvider {
             body["tools"] = json!(tools);
         }
 
-        let response = self.client
+        let mut request = self.client
             .post(format!("{}/chat/completions", self.base_url))
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+            .header("Content-Type", "application/json");
+
+        if self.is_copilot {
+            request = request.header("Copilot-Integration-Id", "vscode-chat");
+        }
+
+        let response = request.json(&body).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();

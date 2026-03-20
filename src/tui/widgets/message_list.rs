@@ -12,6 +12,7 @@ pub enum MessageType {
     Warning,
     Error,
     System,
+    Welcome,
 }
 
 #[derive(Debug, Clone)]
@@ -113,23 +114,32 @@ impl MessageList {
 
         for msg in &self.messages {
             match &msg.msg_type {
+                MessageType::Welcome => {
+                    for line in msg.content.lines() {
+                        lines.push(Line::from(Span::styled(
+                            line.to_string(),
+                            Style::default().fg(Theme::text_dim()),
+                        )));
+                    }
+                    lines.push(Line::default());
+                }
                 MessageType::Thinking => {
                     if msg.collapsed {
                         let preview = msg.content.lines().next().unwrap_or("").chars().take(50).collect::<String>();
                         lines.push(Line::from(vec![
-                            Span::styled("  ▸ ", Style::default().fg(Theme::text_dim())),
-                            Span::styled("thinking", Style::default().fg(Theme::text_dim()).add_modifier(Modifier::ITALIC)),
-                            Span::styled(format!("  {}...", preview), Style::default().fg(Theme::text_dim())),
+                            Span::styled("  \u{25b8} ", Style::default().fg(Theme::text_muted())),
+                            Span::styled("thinking", Style::default().fg(Theme::text_muted()).add_modifier(Modifier::ITALIC)),
+                            Span::styled(format!("  {}...", preview), Style::default().fg(Theme::text_muted())),
                         ]));
                     } else {
                         lines.push(Line::from(vec![
-                            Span::styled("  ▾ ", Style::default().fg(Theme::text_dim())),
-                            Span::styled("thinking", Style::default().fg(Theme::text_dim()).add_modifier(Modifier::ITALIC)),
+                            Span::styled("  \u{25be} ", Style::default().fg(Theme::text_muted())),
+                            Span::styled("thinking", Style::default().fg(Theme::text_muted()).add_modifier(Modifier::ITALIC)),
                         ]));
                         for line in msg.content.lines() {
                             lines.push(Line::from(vec![
                                 Span::styled("    ", Style::default()),
-                                Span::styled(line.to_string(), Style::default().fg(Theme::text_dim()).add_modifier(Modifier::ITALIC)),
+                                Span::styled(line.to_string(), Style::default().fg(Theme::text_muted()).add_modifier(Modifier::ITALIC)),
                             ]));
                         }
                     }
@@ -139,14 +149,14 @@ impl MessageList {
                     if msg.collapsed {
                         let preview = msg.content.lines().next().unwrap_or("").chars().take(50).collect::<String>();
                         lines.push(Line::from(vec![
-                            Span::styled("  ▸ ", Style::default().fg(Theme::cyan())),
+                            Span::styled("  \u{25b8} ", Style::default().fg(Theme::cyan())),
                             Span::styled("shizuka", Style::default().fg(Theme::cyan()).add_modifier(Modifier::DIM)),
-                            Span::styled(format!("  {}", preview), Style::default().fg(Theme::text_dim())),
+                            Span::styled(format!("  {}", preview), Style::default().fg(Theme::text_muted())),
                         ]));
                     } else {
                         lines.push(Line::from(vec![
-                            Span::styled("  ▾ ", Style::default().fg(Theme::cyan())),
-                            Span::styled("[Shizuka] ", Theme::shizuka_message()),
+                            Span::styled("  \u{25be} ", Style::default().fg(Theme::cyan())),
+                            Span::styled("shizuka ", Theme::shizuka_message()),
                         ]));
                         for line in msg.content.lines() {
                             lines.push(Line::from(vec![
@@ -158,61 +168,92 @@ impl MessageList {
                     lines.push(Line::default());
                 }
                 MessageType::ToolResult { name, success } => {
-                    let icon = if *success { "✓" } else { "✗" };
-                    let style = if *success { Theme::tool_success() } else { Theme::tool_error() };
+                    let icon = if *success { "\u{2713}" } else { "\u{2717}" };
+                    let icon_color = if *success { Theme::green() } else { Theme::red() };
 
                     if msg.collapsed {
                         lines.push(Line::from(vec![
-                            Span::styled("  ▸ ", Theme::tool_header()),
-                            Span::styled(format!("{} {} ", icon, name), style),
+                            Span::styled("  \u{25b8} ", Style::default().fg(Theme::text_muted())),
+                            Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+                            Span::styled(format!("{} ", name), Style::default().fg(Theme::text_dim())),
                             Span::styled(
                                 msg.content.lines().next().unwrap_or("").chars().take(60).collect::<String>(),
-                                Style::default().fg(Theme::text_dim()),
+                                Style::default().fg(Theme::text_muted()),
                             ),
                         ]));
                     } else {
-                        lines.push(Line::from(Span::styled(
-                            format!("  ┌─ {} {} ─", icon, name),
-                            Theme::tool_header(),
-                        )));
-                        for content_line in msg.content.lines() {
+                        lines.push(Line::from(vec![
+                            Span::styled("  ", Style::default()),
+                            Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+                            Span::styled(
+                                format!("{}", name),
+                                Style::default().fg(Theme::text_dim()),
+                            ),
+                        ]));
+                        for content_line in msg.content.lines().take(20) {
                             lines.push(Line::from(vec![
-                                Span::styled("  │ ".to_string(), Theme::tool_header()),
-                                Span::styled(content_line.to_string(), style),
+                                Span::styled("    ", Style::default()),
+                                Span::styled(
+                                    content_line.to_string(),
+                                    Style::default().fg(Theme::text_muted()),
+                                ),
                             ]));
                         }
-                        lines.push(Line::from(Span::styled(
-                            "  └───────────────────────────────────".to_string(),
-                            Theme::tool_header(),
-                        )));
+                        let total = msg.content.lines().count();
+                        if total > 20 {
+                            lines.push(Line::from(Span::styled(
+                                format!("    ... {} more lines", total - 20),
+                                Style::default().fg(Theme::text_muted()),
+                            )));
+                        }
                     }
                     lines.push(Line::default());
                 }
-                other => {
-                    let (prefix, style) = match other {
-                        MessageType::User => ("  ● ".to_string(), Theme::user_message()),
-                        MessageType::Nano => ("  ".to_string(), Theme::nano_message()),
-                        MessageType::Warning => ("  ⚠ ".to_string(), Theme::warning()),
-                        MessageType::Error => ("  ✗ ".to_string(), Theme::error()),
-                        MessageType::System => ("  ".to_string(), Theme::label()),
-                        _ => unreachable!(),
-                    };
-
-                    let content_lines: Vec<&str> = msg.content.lines().collect();
-                    if content_lines.is_empty() {
-                        lines.push(Line::from(Span::styled(prefix.clone(), style)));
-                    } else {
+                MessageType::User => {
+                    lines.push(Line::from(vec![
+                        Span::styled("  > ", Style::default().fg(Theme::mauve())),
+                        Span::styled(
+                            msg.content.lines().next().unwrap_or("").to_string(),
+                            Theme::user_message(),
+                        ),
+                    ]));
+                    for line in msg.content.lines().skip(1) {
                         lines.push(Line::from(vec![
-                            Span::styled(prefix.clone(), style),
-                            Span::styled(content_lines[0].to_string(), style),
+                            Span::styled("    ", Style::default()),
+                            Span::styled(line.to_string(), Theme::user_message()),
                         ]));
-                        let indent = " ".repeat(prefix.len());
-                        for line in &content_lines[1..] {
-                            lines.push(Line::from(vec![
-                                Span::styled(indent.clone(), style),
-                                Span::styled(line.to_string(), style),
-                            ]));
-                        }
+                    }
+                    lines.push(Line::default());
+                }
+                MessageType::Nano => {
+                    for line in msg.content.lines() {
+                        lines.push(Line::from(vec![
+                            Span::styled("  ", Style::default()),
+                            Span::styled(line.to_string(), Theme::nano_message()),
+                        ]));
+                    }
+                    lines.push(Line::default());
+                }
+                MessageType::Warning => {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ! ", Style::default().fg(Theme::yellow())),
+                        Span::styled(msg.content.clone(), Theme::warning()),
+                    ]));
+                    lines.push(Line::default());
+                }
+                MessageType::Error => {
+                    lines.push(Line::from(vec![
+                        Span::styled("  \u{2717} ", Style::default().fg(Theme::red())),
+                        Span::styled(msg.content.clone(), Theme::error()),
+                    ]));
+                    lines.push(Line::default());
+                }
+                MessageType::System => {
+                    for line in msg.content.lines() {
+                        lines.push(Line::from(vec![
+                            Span::styled("  ", Style::default()),
+                            Span::styled(line.to_string(), Style::default().fg(Theme::text_dim())),
+                        ]));
                     }
                     lines.push(Line::default());
                 }
@@ -274,6 +315,7 @@ impl MessageList {
 
         frame.render_widget(paragraph, area);
 
+        // Scrollbar
         if total_lines > visible_height {
             let mut scrollbar_state = ScrollbarState::new(total_lines)
                 .position(self.scroll_offset)

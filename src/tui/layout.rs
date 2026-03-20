@@ -9,12 +9,12 @@ pub struct AppLayout {
 
 impl AppLayout {
     pub fn compute(area: Rect, input_height: u16) -> Self {
-        let clamped_input = input_height.clamp(3, area.height.saturating_sub(8).max(3));
+        let clamped_input = input_height.clamp(3, area.height.saturating_sub(6).max(3));
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),          // header
+                Constraint::Length(2),          // header (2-line)
                 Constraint::Min(4),             // messages
                 Constraint::Length(clamped_input), // input
                 Constraint::Length(1),          // status

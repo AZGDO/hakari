@@ -5,14 +5,16 @@ pub struct Theme;
 
 impl Theme {
     // Background
-    pub fn bg() -> Color { Color::Rgb(22, 22, 30) }
-    pub fn surface() -> Color { Color::Rgb(30, 30, 42) }
-    pub fn surface_bright() -> Color { Color::Rgb(40, 40, 55) }
+    pub fn bg() -> Color { Color::Rgb(17, 17, 27) }
+    pub fn surface() -> Color { Color::Rgb(24, 24, 37) }
+    pub fn surface_bright() -> Color { Color::Rgb(35, 35, 50) }
+    pub fn surface_elevated() -> Color { Color::Rgb(42, 42, 58) }
 
     // Text
     pub fn text() -> Color { Color::Rgb(205, 214, 244) }
-    pub fn text_dim() -> Color { Color::Rgb(127, 132, 156) }
+    pub fn text_dim() -> Color { Color::Rgb(108, 112, 134) }
     pub fn text_bright() -> Color { Color::Rgb(245, 245, 255) }
+    pub fn text_muted() -> Color { Color::Rgb(80, 84, 104) }
 
     // Accent colors
     pub fn blue() -> Color { Color::Rgb(137, 180, 250) }
@@ -23,18 +25,22 @@ impl Theme {
     pub fn mauve() -> Color { Color::Rgb(203, 166, 247) }
     pub fn peach() -> Color { Color::Rgb(250, 179, 135) }
     pub fn teal() -> Color { Color::Rgb(148, 226, 213) }
+    pub fn pink() -> Color { Color::Rgb(245, 194, 231) }
+    pub fn lavender() -> Color { Color::Rgb(180, 190, 254) }
+    pub fn sapphire() -> Color { Color::Rgb(116, 199, 236) }
 
     // Borders
-    pub fn border() -> Color { Color::Rgb(69, 71, 90) }
-    pub fn border_focus() -> Color { Self::blue() }
+    pub fn border() -> Color { Color::Rgb(49, 50, 68) }
+    pub fn border_focus() -> Color { Color::Rgb(88, 91, 112) }
+    pub fn border_accent() -> Color { Self::mauve() }
 
     // Semantic styles
     pub fn user_message() -> Style {
-        Style::default().fg(Self::text_bright()).add_modifier(Modifier::BOLD)
+        Style::default().fg(Self::text_bright())
     }
 
     pub fn nano_message() -> Style {
-        Style::default().fg(Self::green())
+        Style::default().fg(Self::text())
     }
 
     pub fn shizuka_message() -> Style {
@@ -42,7 +48,7 @@ impl Theme {
     }
 
     pub fn tool_header() -> Style {
-        Style::default().fg(Self::yellow()).add_modifier(Modifier::BOLD)
+        Style::default().fg(Self::text_muted())
     }
 
     pub fn tool_success() -> Style {
@@ -62,7 +68,7 @@ impl Theme {
     }
 
     pub fn status_bar() -> Style {
-        Style::default().bg(Self::surface_bright()).fg(Self::text())
+        Style::default().bg(Self::surface()).fg(Self::text_dim())
     }
 
     pub fn header() -> Style {
@@ -90,19 +96,23 @@ impl Theme {
     }
 
     pub fn badge_trivial() -> Style {
-        Style::default().fg(Self::green()).add_modifier(Modifier::BOLD)
+        Style::default().fg(Self::green())
     }
 
     pub fn badge_small() -> Style {
-        Style::default().fg(Self::blue()).add_modifier(Modifier::BOLD)
+        Style::default().fg(Self::blue())
     }
 
     pub fn badge_medium() -> Style {
-        Style::default().fg(Self::yellow()).add_modifier(Modifier::BOLD)
+        Style::default().fg(Self::yellow())
     }
 
     pub fn badge_large() -> Style {
-        Style::default().fg(Self::red()).add_modifier(Modifier::BOLD)
+        Style::default().fg(Self::red())
+    }
+
+    pub fn accent() -> Style {
+        Style::default().fg(Self::mauve())
     }
 
     pub fn block_default() -> ratatui::widgets::Block<'static> {

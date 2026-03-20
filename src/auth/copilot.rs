@@ -4,7 +4,6 @@ use std::path::PathBuf;
 const CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
 const VERSION: &str = "0.1.85";
 const COPILOT_API: &str = "https://api.githubcopilot.com";
-const MODELS_URL: &str = "https://models.dev/api.json";
 const PROVIDER_KEY: &str = "github-copilot";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +27,10 @@ pub struct CopilotModel {
     pub tool_call: bool,
     #[serde(default)]
     pub limit: Option<ModelLimit>,
+    #[serde(default)]
+    pub input_rate: Option<f64>,
+    #[serde(default)]
+    pub output_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +39,14 @@ pub struct ModelLimit {
     pub context: usize,
     #[serde(default)]
     pub output: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopilotUsage {
+    pub used: u64,
+    pub limit: u64,
+    pub percent_left: f64,
+    pub requests_left: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,9 +203,13 @@ pub async fn poll_for_token(state: &DeviceFlowState) -> anyhow::Result<Option<St
 }
 
 pub async fn fetch_models() -> anyhow::Result<Vec<CopilotModel>> {
+    let token = get_token().ok_or_else(|| anyhow::anyhow!("Not authenticated with Copilot"))?;
     let client = reqwest::Client::new();
     let res = client
-        .get(MODELS_URL)
+        .get(format!("{}/models", copilot_base_url()))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Copilot-Integration-Id", "vscode-chat")
+        .header("Accept", "application/json")
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await?;
@@ -204,17 +219,33 @@ pub async fn fetch_models() -> anyhow::Result<Vec<CopilotModel>> {
     }
 
     let data: serde_json::Value = res.json().await?;
-    let provider = data.get(PROVIDER_KEY)
-        .ok_or_else(|| anyhow::anyhow!("No github-copilot provider found"))?;
-    let models_obj = provider.get("models")
-        .ok_or_else(|| anyhow::anyhow!("No models field"))?;
 
     let mut models: Vec<CopilotModel> = Vec::new();
-    if let Some(obj) = models_obj.as_object() {
-        for (_key, val) in obj {
-            if let Ok(m) = serde_json::from_value::<CopilotModel>(val.clone()) {
-                models.push(m);
-            }
+    if let Some(arr) = data["data"].as_array() {
+        for val in arr {
+            let id = val["id"].as_str().unwrap_or("").to_string();
+            let name = val["name"].as_str().unwrap_or(&id).to_string();
+            if id.is_empty() { continue; }
+
+            let caps = &val["capabilities"];
+            let family = caps["family"].as_str().map(|s| s.to_string());
+            let reasoning = caps["supports"]["reasoning_effort"].is_array()
+                || caps["supports"]["adaptive_thinking"].as_bool().unwrap_or(false);
+            let tool_call = caps["supports"]["tool_calls"].as_bool().unwrap_or(false);
+            let context = caps["limits"]["max_context_window_tokens"].as_u64().unwrap_or(0) as usize;
+            let output = caps["limits"]["max_output_tokens"].as_u64().unwrap_or(0) as usize;
+
+            // Copilot API doesn't expose pricing — leave as None
+            models.push(CopilotModel {
+                id,
+                name,
+                family,
+                reasoning,
+                tool_call,
+                limit: Some(ModelLimit { context, output }),
+                input_rate: None,
+                output_rate: None,
+            });
         }
     }
 
@@ -224,4 +255,42 @@ pub async fn fetch_models() -> anyhow::Result<Vec<CopilotModel>> {
 
 pub fn copilot_base_url() -> String {
     std::env::var("COPILOT_API").unwrap_or_else(|_| COPILOT_API.to_string())
+}
+
+pub async fn fetch_usage() -> anyhow::Result<CopilotUsage> {
+    let token = get_token().ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{}/usage", copilot_base_url()))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Copilot-Integration-Id", "vscode-chat")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await?;
+
+    if !res.status().is_success() {
+        // Fallback: return unknown usage
+        return Ok(CopilotUsage {
+            used: 0,
+            limit: 0,
+            percent_left: 100.0,
+            requests_left: 0,
+        });
+    }
+
+    let data: serde_json::Value = res.json().await?;
+    let used = data["chat_messages_used"].as_u64()
+        .or_else(|| data["total_used"].as_u64())
+        .unwrap_or(0);
+    let limit = data["chat_messages_limit"].as_u64()
+        .or_else(|| data["total_limit"].as_u64())
+        .unwrap_or(0);
+    let (percent_left, requests_left) = if limit > 0 {
+        let left = limit.saturating_sub(used);
+        ((left as f64 / limit as f64) * 100.0, left)
+    } else {
+        (100.0, 0)
+    };
+
+    Ok(CopilotUsage { used, limit, percent_left, requests_left })
 }
