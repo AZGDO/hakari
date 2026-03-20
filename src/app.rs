@@ -1,3 +1,4 @@
+use crate::auth::copilot;
 use crate::config::HakariConfig;
 use crate::llm::client::LlmClient;
 use crate::memory::kkm::Kkm;
@@ -7,13 +8,14 @@ use crate::memory::improvement;
 use crate::nano::agent::{AgentEvent, NanoAgent};
 use crate::project::detector;
 use crate::shizuka::preparation;
+use crate::tui::commands;
 use crate::tui::event::{self, AppEvent};
 use crate::tui::layout::AppLayout;
 use crate::tui::theme::Theme;
-use crate::tui::widgets::header::{self, HeaderData};
+use crate::tui::widgets::header::{self, AuthDisplay, HeaderData};
 use crate::tui::widgets::input_bar::InputBar;
 use crate::tui::widgets::message_list::{ChatMessage, MessageList, MessageType};
-use crate::tui::widgets::popup::Popup;
+use crate::tui::widgets::popup::{ConnectState, ModelEntry, Popup, PopupType, SettingEntry};
 use crate::tui::widgets::progress::Spinner;
 use crate::tui::widgets::status_bar::{self, AgentStatus, StatusBarData};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -44,8 +46,20 @@ pub struct App {
     pub running: bool,
     pub agent_running: bool,
     pub agent_rx: Option<mpsc::UnboundedReceiver<AgentEvent>>,
-    pub show_help: bool,
     pub clipboard: Option<arboard::Clipboard>,
+    pub connect_polling: bool,
+    pub connect_state: Option<copilot::DeviceFlowState>,
+    pub connect_rx: Option<mpsc::UnboundedReceiver<ConnectEvent>>,
+    pub model_rx: Option<mpsc::UnboundedReceiver<Vec<copilot::CopilotModel>>>,
+    pub tick_count: u64,
+}
+
+#[derive(Debug)]
+pub enum ConnectEvent {
+    FlowStarted(copilot::DeviceFlowState),
+    TokenReceived,
+    Error(String),
+    Pending,
 }
 
 impl App {
@@ -54,10 +68,8 @@ impl App {
         let kms = Kms::new(session_id.clone());
         let kpms = Kpms::load(&project_dir).unwrap_or_default();
         let kkm = Kkm::load().unwrap_or_default();
-
         let config = Arc::new(config);
         let llm_client = LlmClient::new(&config).ok().map(Arc::new);
-
         let clipboard = arboard::Clipboard::new().ok();
 
         let mut app = Self {
@@ -82,33 +94,37 @@ impl App {
             running: true,
             agent_running: false,
             agent_rx: None,
-            show_help: false,
             clipboard,
+            connect_polling: false,
+            connect_state: None,
+            connect_rx: None,
+            model_rx: None,
+            tick_count: 0,
         };
 
-        // Detect project and update KPMS if needed
         if app.kpms.project.name.is_empty() {
             let detected = detector::detect_project(&project_dir);
             app.kpms.project = detected;
             let _ = app.kpms.save(&project_dir);
         }
 
-        // Welcome message
         app.message_list.add_message(ChatMessage {
             msg_type: MessageType::System,
             content: format!(
-                "Welcome to HAKARI — {} ({})\nType your task below and press Enter.",
+                "Welcome to HAKARI -- {} ({})\nType a task or use / for commands, @ to mention files.",
                 app.kpms.project.name,
                 if app.kpms.project.language.is_empty() { "unknown" } else { &app.kpms.project.language }
             ),
             timestamp: None,
+            collapsed: false,
         });
 
-        if app.llm_client.is_none() {
+        if !copilot::is_authenticated() && app.llm_client.is_none() {
             app.message_list.add_message(ChatMessage {
-                msg_type: MessageType::Warning,
-                content: "No LLM API key configured. Set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable.".to_string(),
+                msg_type: MessageType::System,
+                content: "Use /connect to authenticate with GitHub Copilot, or set OPENAI_API_KEY / ANTHROPIC_API_KEY.".to_string(),
                 timestamp: None,
+                collapsed: false,
             });
         }
 
@@ -119,59 +135,24 @@ impl App {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
             AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
-            AppEvent::Resize(_, _) => {} // Layout recomputes automatically
+            AppEvent::Resize(_, _) => {}
             AppEvent::Tick => self.handle_tick(),
         }
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
-        // Global keys
         if event::is_quit(&key) {
             self.running = false;
             return;
         }
 
-        // Popup handling
+        // Popup mode
         if self.popup.is_some() {
-            match key.code {
-                KeyCode::Esc => {
-                    self.popup = None;
-                    self.mode = AppMode::Input;
-                }
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    // Handle confirmation
-                    self.popup = None;
-                    self.mode = AppMode::Input;
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.popup = None;
-                    self.mode = AppMode::Input;
-                }
-                _ => {}
-            }
+            self.handle_popup_key(key);
             return;
         }
 
-        // Help toggle
-        if key.code == KeyCode::Char('?') && !self.agent_running {
-            if self.show_help {
-                self.show_help = false;
-                self.popup = None;
-                self.mode = AppMode::Input;
-            } else {
-                self.show_help = true;
-                self.popup = Some(Popup::help());
-                self.mode = AppMode::Popup;
-            }
-            return;
-        }
-
-        // Escape from scrolling
         if key.code == KeyCode::Esc {
-            if self.show_help {
-                self.show_help = false;
-                self.popup = None;
-            }
             self.mode = AppMode::Input;
             self.message_list.scroll_to_bottom();
             return;
@@ -179,94 +160,185 @@ impl App {
 
         // Copy
         if event::is_copy(&key) {
-            if let Some(ref mut clipboard) = self.clipboard {
-                // Copy all messages as text
-                let text: String = self.message_list.messages.iter()
-                    .map(|m| m.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                let _ = clipboard.set_text(text);
-            }
+            self.do_copy();
             return;
         }
 
         // Paste
         if event::is_paste(&key) {
-            if let Some(ref mut clipboard) = self.clipboard {
-                if let Ok(text) = clipboard.get_text() {
-                    self.input_bar.insert_str(&text);
-                }
-            }
+            self.do_paste();
             return;
         }
 
         match &self.mode {
-            AppMode::Input => {
-                match key.code {
-                    KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                        if let Some(text) = self.input_bar.submit() {
-                            self.submit_prompt(text);
-                        }
-                    }
-                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                        self.input_bar.insert_newline();
-                    }
-                    KeyCode::Backspace => self.input_bar.delete_char_before(),
-                    KeyCode::Delete => self.input_bar.delete_char_after(),
-                    KeyCode::Left => self.input_bar.move_cursor_left(),
-                    KeyCode::Right => self.input_bar.move_cursor_right(),
-                    KeyCode::Home => self.input_bar.move_cursor_home(),
-                    KeyCode::End => self.input_bar.move_cursor_end(),
-                    KeyCode::Up => {
-                        if self.input_bar.content.is_empty() || !self.input_bar.content.contains('\n') {
-                            self.input_bar.history_prev();
-                        }
-                    }
-                    KeyCode::Down => {
-                        if self.input_bar.content.is_empty() || !self.input_bar.content.contains('\n') {
-                            self.input_bar.history_next();
-                        }
-                    }
-                    KeyCode::PageUp => {
-                        self.message_list.page_up(10);
-                        self.mode = AppMode::Scrolling;
-                    }
-                    KeyCode::PageDown => {
-                        self.message_list.page_down(10);
-                    }
-                    KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.input_bar.delete_word_before();
-                    }
-                    KeyCode::Char(c) => {
-                        self.input_bar.insert_char(c);
-                    }
-                    _ => {}
+            AppMode::Input => self.handle_input_key(key),
+            AppMode::Scrolling => self.handle_scroll_key(key),
+            AppMode::Popup => {}
+        }
+    }
+
+    fn handle_popup_key(&mut self, key: crossterm::event::KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.popup = None;
+                self.connect_polling = false;
+                self.mode = AppMode::Input;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(ref mut popup) = self.popup {
+                    popup.select_up();
                 }
             }
-            AppMode::Scrolling => {
-                match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => self.message_list.scroll_down(1),
-                    KeyCode::Char('k') | KeyCode::Up => self.message_list.scroll_up(1),
-                    KeyCode::PageUp => self.message_list.page_up(10),
-                    KeyCode::PageDown => self.message_list.page_down(10),
-                    KeyCode::Home | KeyCode::Char('g') => {
-                        self.message_list.scroll_offset = 0;
-                        self.message_list.auto_scroll = false;
-                    }
-                    KeyCode::End | KeyCode::Char('G') => {
-                        self.message_list.scroll_to_bottom();
-                        self.mode = AppMode::Input;
-                    }
-                    KeyCode::Char(c) => {
-                        // Switch back to input mode on regular typing
-                        self.mode = AppMode::Input;
-                        self.message_list.scroll_to_bottom();
-                        self.input_bar.insert_char(c);
-                    }
-                    _ => {}
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(ref mut popup) = self.popup {
+                    popup.select_down();
                 }
             }
-            AppMode::Popup => {} // Handled above
+            KeyCode::Enter => {
+                self.handle_popup_enter();
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let Some(ref popup) = self.popup {
+                    if matches!(popup.popup_type, PopupType::Confirmation { .. }) {
+                        self.popup = None;
+                        self.mode = AppMode::Input;
+                    }
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                if let Some(ref popup) = self.popup {
+                    if matches!(popup.popup_type, PopupType::Confirmation { .. }) {
+                        self.popup = None;
+                        self.mode = AppMode::Input;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_popup_enter(&mut self) {
+        let selected_model = if let Some(ref popup) = self.popup {
+            if let PopupType::ModelSelector { models, selected, .. } = &popup.popup_type {
+                models.get(*selected).map(|m| m.id.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(model_id) = selected_model {
+            self.set_model(&model_id);
+            self.popup = None;
+            self.mode = AppMode::Input;
+            self.message_list.add_message(ChatMessage {
+                msg_type: MessageType::System,
+                content: format!("Model set to: {}", model_id),
+                timestamp: None,
+                collapsed: false,
+            });
+        }
+    }
+
+    fn handle_input_key(&mut self, key: crossterm::event::KeyEvent) {
+        // Suggestion navigation
+        if self.input_bar.has_suggestions() {
+            match key.code {
+                KeyCode::Tab | KeyCode::Enter if self.input_bar.has_suggestions() && key.code == KeyCode::Tab => {
+                    self.input_bar.accept_suggestion();
+                    return;
+                }
+                KeyCode::Up => {
+                    self.input_bar.suggestion_up();
+                    return;
+                }
+                KeyCode::Down => {
+                    self.input_bar.suggestion_down();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        match key.code {
+            KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                if self.input_bar.has_suggestions() {
+                    // If suggestions shown and user presses enter on a slash command, accept it
+                    if !self.input_bar.slash_suggestions.is_empty() {
+                        self.input_bar.accept_suggestion();
+                        return;
+                    }
+                }
+                if let Some(text) = self.input_bar.submit() {
+                    self.process_input(text);
+                }
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.input_bar.insert_newline();
+            }
+            KeyCode::Tab => {
+                if self.input_bar.has_suggestions() {
+                    self.input_bar.accept_suggestion();
+                } else {
+                    self.input_bar.insert_str("  ");
+                }
+            }
+            KeyCode::Backspace => self.input_bar.delete_char_before(),
+            KeyCode::Delete => self.input_bar.delete_char_after(),
+            KeyCode::Left => self.input_bar.move_cursor_left(),
+            KeyCode::Right => self.input_bar.move_cursor_right(),
+            KeyCode::Home => self.input_bar.move_cursor_home(),
+            KeyCode::End => self.input_bar.move_cursor_end(),
+            KeyCode::Up => {
+                if !self.input_bar.has_suggestions() {
+                    self.input_bar.history_prev();
+                }
+            }
+            KeyCode::Down => {
+                if !self.input_bar.has_suggestions() {
+                    self.input_bar.history_next();
+                }
+            }
+            KeyCode::PageUp => {
+                self.message_list.page_up(10);
+                self.mode = AppMode::Scrolling;
+            }
+            KeyCode::PageDown => {
+                self.message_list.page_down(10);
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input_bar.delete_word_before();
+            }
+            KeyCode::Char(c) => {
+                self.input_bar.insert_char(c);
+                // Update file suggestions after typing @
+                self.input_bar.update_file_suggestions(&self.project_dir);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_scroll_key(&mut self, key: crossterm::event::KeyEvent) {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.message_list.scroll_down(1),
+            KeyCode::Char('k') | KeyCode::Up => self.message_list.scroll_up(1),
+            KeyCode::PageUp => self.message_list.page_up(10),
+            KeyCode::PageDown => self.message_list.page_down(10),
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.message_list.scroll_offset = 0;
+                self.message_list.auto_scroll = false;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.message_list.scroll_to_bottom();
+                self.mode = AppMode::Input;
+            }
+            KeyCode::Char(c) => {
+                self.mode = AppMode::Input;
+                self.message_list.scroll_to_bottom();
+                self.input_bar.insert_char(c);
+            }
+            _ => {}
         }
     }
 
@@ -282,11 +354,17 @@ impl App {
     }
 
     fn handle_tick(&mut self) {
+        self.tick_count += 1;
         if self.agent_running {
             self.spinner.tick();
         }
 
-        // Collect agent events first to avoid borrow issues
+        self.process_agent_events();
+        self.process_connect_events();
+        self.process_model_events();
+    }
+
+    fn process_agent_events(&mut self) {
         let events: Vec<AgentEvent> = if let Some(ref mut rx) = self.agent_rx {
             let mut collected = Vec::new();
             while let Ok(event) = rx.try_recv() {
@@ -304,6 +382,7 @@ impl App {
                     self.spinner.label = "thinking...".to_string();
                 }
                 AgentEvent::TextDelta(text) => {
+                    if text.is_empty() { continue; }
                     if let Some(last) = self.message_list.messages.last() {
                         if matches!(last.msg_type, MessageType::Nano) {
                             self.message_list.append_to_last(&text);
@@ -312,6 +391,7 @@ impl App {
                                 msg_type: MessageType::Nano,
                                 content: text,
                                 timestamp: None,
+                                collapsed: false,
                             });
                         }
                     } else {
@@ -319,18 +399,20 @@ impl App {
                             msg_type: MessageType::Nano,
                             content: text,
                             timestamp: None,
+                            collapsed: false,
                         });
                     }
                 }
                 AgentEvent::ToolCallStart { name, .. } => {
                     self.status.status = AgentStatus::ToolRunning(name.clone());
-                    self.spinner.label = format!("running {}...", name);
+                    self.spinner.label = format!("{}...", name);
                 }
                 AgentEvent::ToolCallEnd { name, result, success } => {
                     self.message_list.add_message(ChatMessage {
                         msg_type: MessageType::ToolResult { name, success },
                         content: result,
                         timestamp: None,
+                        collapsed: false,
                     });
                     self.status.step = self.kms.steps.current;
                     self.status.context_tokens = self.kms.context.total_tokens_estimate;
@@ -340,13 +422,14 @@ impl App {
                         msg_type: MessageType::Warning,
                         content: msg,
                         timestamp: None,
+                        collapsed: false,
                     });
                 }
                 AgentEvent::Escalation(summary) => {
                     self.popup = Some(Popup::escalation(&summary));
                     self.mode = AppMode::Popup;
                 }
-                AgentEvent::Complete(_msg) => {
+                AgentEvent::Complete(_) => {
                     self.agent_running = false;
                     self.status.status = AgentStatus::Complete;
                     self.persist_session_data();
@@ -356,10 +439,457 @@ impl App {
                         msg_type: MessageType::Error,
                         content: msg,
                         timestamp: None,
+                        collapsed: false,
                     });
                     self.agent_running = false;
                     self.status.status = AgentStatus::Error;
                 }
+            }
+        }
+    }
+
+    fn process_connect_events(&mut self) {
+        let events: Vec<ConnectEvent> = if let Some(ref mut rx) = self.connect_rx {
+            let mut collected = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                collected.push(event);
+            }
+            collected
+        } else {
+            Vec::new()
+        };
+
+        for event in events {
+            match event {
+                ConnectEvent::FlowStarted(state) => {
+                    self.connect_state = Some(state.clone());
+                    if let Some(ref mut popup) = self.popup {
+                        popup.popup_type = PopupType::ConnectFlow {
+                            state: ConnectState::WaitingForAuth {
+                                uri: state.verification_uri,
+                                code: state.user_code,
+                            },
+                        };
+                    }
+                }
+                ConnectEvent::TokenReceived => {
+                    self.connect_polling = false;
+                    if let Some(ref mut popup) = self.popup {
+                        popup.popup_type = PopupType::ConnectFlow {
+                            state: ConnectState::Success,
+                        };
+                    }
+                    // Rebuild LLM client with copilot
+                    self.rebuild_llm_client();
+                }
+                ConnectEvent::Error(e) => {
+                    self.connect_polling = false;
+                    if let Some(ref mut popup) = self.popup {
+                        popup.popup_type = PopupType::ConnectFlow {
+                            state: ConnectState::Error(e),
+                        };
+                    }
+                }
+                ConnectEvent::Pending => {}
+            }
+        }
+    }
+
+    fn process_model_events(&mut self) {
+        if let Some(ref mut rx) = self.model_rx {
+            if let Ok(models) = rx.try_recv() {
+                let entries: Vec<ModelEntry> = models.iter().map(|m| ModelEntry {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    reasoning: m.reasoning,
+                    context: m.limit.as_ref().map(|l| l.context).unwrap_or(0),
+                    active: m.id == self.config.nano_model,
+                }).collect();
+                self.popup = Some(Popup::model_selector(entries, &self.config.nano_model));
+                self.mode = AppMode::Popup;
+                self.model_rx = None;
+            }
+        }
+    }
+
+    fn process_input(&mut self, input: String) {
+        // Check if it's a slash command
+        if let Some((cmd, args)) = commands::parse_command(&input) {
+            self.execute_command(cmd, args);
+            return;
+        }
+
+        // Extract @mentions for file pinning
+        let mentions = commands::extract_at_mentions(&input);
+        for mention in &mentions {
+            self.input_bar.pin_file(mention);
+        }
+
+        self.submit_prompt(input);
+    }
+
+    fn execute_command(&mut self, cmd: &str, args: &str) {
+        match cmd {
+            "/help" | "/?" => {
+                self.popup = Some(Popup::help());
+                self.mode = AppMode::Popup;
+            }
+            "/clear" => {
+                self.message_list.messages.clear();
+                self.message_list.scroll_offset = 0;
+                self.message_list.add_message(ChatMessage {
+                    msg_type: MessageType::System,
+                    content: "Chat cleared.".to_string(),
+                    timestamp: None,
+                    collapsed: false,
+                });
+            }
+            "/compact" => {
+                self.message_list.collapse_all_traces();
+                self.message_list.add_message(ChatMessage {
+                    msg_type: MessageType::System,
+                    content: "All thinking/traces collapsed.".to_string(),
+                    timestamp: None,
+                    collapsed: false,
+                });
+            }
+            "/model" | "/models" => {
+                self.show_model_selector(args);
+            }
+            "/connect" => {
+                self.start_connect_flow();
+            }
+            "/settings" => {
+                self.show_settings();
+            }
+            "/status" => {
+                let auth = if copilot::is_authenticated() { "connected" } else { "not connected" };
+                let status = format!(
+                    "Session: {}\nModel: {}\nAuth: {}\nSteps: {}\nFiles modified: {}\nPinned: {}",
+                    &self.kms.session_id[..8],
+                    self.config.nano_model,
+                    auth,
+                    self.kms.steps.current,
+                    self.kms.files.index.values().filter(|f| f.is_modified).count(),
+                    self.input_bar.pinned_files.join(", "),
+                );
+                self.message_list.add_message(ChatMessage {
+                    msg_type: MessageType::System,
+                    content: status,
+                    timestamp: None,
+                    collapsed: false,
+                });
+            }
+            "/reset" => {
+                let session_id = uuid::Uuid::new_v4().to_string();
+                self.kms = Kms::new(session_id);
+                self.status.step = 0;
+                self.status.context_tokens = 0;
+                self.status.classification = None;
+                self.message_list.add_message(ChatMessage {
+                    msg_type: MessageType::System,
+                    content: "Session memory reset.".to_string(),
+                    timestamp: None,
+                    collapsed: false,
+                });
+            }
+            "/pin" => {
+                if !args.is_empty() {
+                    let file = args.trim_start_matches('@');
+                    let path = self.project_dir.join(file);
+                    if path.exists() {
+                        self.input_bar.pin_file(file);
+                        self.message_list.add_message(ChatMessage {
+                            msg_type: MessageType::System,
+                            content: format!("Pinned: @{}", file),
+                            timestamp: None,
+                            collapsed: false,
+                        });
+                    } else {
+                        self.message_list.add_message(ChatMessage {
+                            msg_type: MessageType::Warning,
+                            content: format!("File not found: {}", file),
+                            timestamp: None,
+                            collapsed: false,
+                        });
+                    }
+                }
+            }
+            "/unpin" => {
+                let file = args.trim_start_matches('@');
+                self.input_bar.unpin_file(file);
+                self.message_list.add_message(ChatMessage {
+                    msg_type: MessageType::System,
+                    content: format!("Unpinned: @{}", file),
+                    timestamp: None,
+                    collapsed: false,
+                });
+            }
+            "/files" => {
+                if self.input_bar.pinned_files.is_empty() {
+                    self.message_list.add_message(ChatMessage {
+                        msg_type: MessageType::System,
+                        content: "No pinned files. Use @filename to pin.".to_string(),
+                        timestamp: None,
+                        collapsed: false,
+                    });
+                } else {
+                    let list = self.input_bar.pinned_files.iter()
+                        .map(|f| format!("  @{}", f))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.message_list.add_message(ChatMessage {
+                        msg_type: MessageType::System,
+                        content: format!("Pinned files:\n{}", list),
+                        timestamp: None,
+                        collapsed: false,
+                    });
+                }
+            }
+            "/diff" => {
+                let diffs: Vec<String> = self.kms.files.index.iter()
+                    .filter(|(_, info)| info.is_modified)
+                    .map(|(path, _)| format!("  M {}", path))
+                    .collect();
+                if diffs.is_empty() {
+                    self.message_list.add_message(ChatMessage {
+                        msg_type: MessageType::System,
+                        content: "No files modified this session.".to_string(),
+                        timestamp: None,
+                        collapsed: false,
+                    });
+                } else {
+                    self.message_list.add_message(ChatMessage {
+                        msg_type: MessageType::System,
+                        content: format!("Modified files:\n{}", diffs.join("\n")),
+                        timestamp: None,
+                        collapsed: false,
+                    });
+                }
+            }
+            "/undo" => {
+                let undone: Vec<String> = self.kms.files.backups.keys().cloned().collect();
+                if undone.is_empty() {
+                    self.message_list.add_message(ChatMessage {
+                        msg_type: MessageType::System,
+                        content: "Nothing to undo.".to_string(),
+                        timestamp: None,
+                        collapsed: false,
+                    });
+                } else {
+                    for (path, content) in &self.kms.files.backups {
+                        let full = self.project_dir.join(path);
+                        let _ = std::fs::write(&full, content);
+                    }
+                    self.message_list.add_message(ChatMessage {
+                        msg_type: MessageType::System,
+                        content: format!("Restored {} file(s).", undone.len()),
+                        timestamp: None,
+                        collapsed: false,
+                    });
+                }
+            }
+            "/cost" => {
+                self.message_list.add_message(ChatMessage {
+                    msg_type: MessageType::System,
+                    content: format!(
+                        "Token usage:\n  Context: ~{} tokens\n  Steps: {}",
+                        self.kms.context.total_tokens_estimate,
+                        self.kms.steps.current,
+                    ),
+                    timestamp: None,
+                    collapsed: false,
+                });
+            }
+            "/export" => {
+                let path = if args.is_empty() { "hakari-chat.txt" } else { args };
+                let content: String = self.message_list.messages.iter()
+                    .map(|m| m.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n---\n\n");
+                match std::fs::write(self.project_dir.join(path), &content) {
+                    Ok(_) => {
+                        self.message_list.add_message(ChatMessage {
+                            msg_type: MessageType::System,
+                            content: format!("Chat exported to {}", path),
+                            timestamp: None,
+                            collapsed: false,
+                        });
+                    }
+                    Err(e) => {
+                        self.message_list.add_message(ChatMessage {
+                            msg_type: MessageType::Error,
+                            content: format!("Export failed: {}", e),
+                            timestamp: None,
+                            collapsed: false,
+                        });
+                    }
+                }
+            }
+            "/quit" => {
+                self.running = false;
+            }
+            _ => {
+                self.message_list.add_message(ChatMessage {
+                    msg_type: MessageType::Warning,
+                    content: format!("Unknown command: {}. Type /help for available commands.", cmd),
+                    timestamp: None,
+                    collapsed: false,
+                });
+            }
+        }
+    }
+
+    fn show_model_selector(&mut self, args: &str) {
+        if !args.is_empty() {
+            self.set_model(args);
+            self.message_list.add_message(ChatMessage {
+                msg_type: MessageType::System,
+                content: format!("Model set to: {}", args),
+                timestamp: None,
+                collapsed: false,
+            });
+            return;
+        }
+
+        self.popup = Some(Popup::model_selector_loading());
+        self.mode = AppMode::Popup;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.model_rx = Some(rx);
+
+        tokio::spawn(async move {
+            match copilot::fetch_models().await {
+                Ok(models) => { let _ = tx.send(models); }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch models: {}", e);
+                    let _ = tx.send(Vec::new());
+                }
+            }
+        });
+    }
+
+    fn show_settings(&mut self) {
+        let entries = vec![
+            SettingEntry {
+                key: "nano_model".to_string(),
+                label: "Nano Model".to_string(),
+                value: self.config.nano_model.clone(),
+                editable: true,
+            },
+            SettingEntry {
+                key: "shizuka_model".to_string(),
+                label: "Shizuka Model".to_string(),
+                value: self.config.shizuka_model.clone(),
+                editable: true,
+            },
+            SettingEntry {
+                key: "nano_provider".to_string(),
+                label: "Nano Provider".to_string(),
+                value: format!("{:?}", self.config.nano_provider),
+                editable: true,
+            },
+            SettingEntry {
+                key: "max_context".to_string(),
+                label: "Max Context Tokens".to_string(),
+                value: format!("{}", self.config.max_context_tokens),
+                editable: true,
+            },
+            SettingEntry {
+                key: "auth".to_string(),
+                label: "GitHub Copilot".to_string(),
+                value: if copilot::is_authenticated() { "Connected".to_string() } else { "Not connected".to_string() },
+                editable: false,
+            },
+            SettingEntry {
+                key: "project".to_string(),
+                label: "Project".to_string(),
+                value: self.kpms.project.name.clone(),
+                editable: false,
+            },
+            SettingEntry {
+                key: "language".to_string(),
+                label: "Language".to_string(),
+                value: self.kpms.project.language.clone(),
+                editable: false,
+            },
+        ];
+        self.popup = Some(Popup::settings(entries));
+        self.mode = AppMode::Popup;
+    }
+
+    fn start_connect_flow(&mut self) {
+        self.popup = Some(Popup::connect_flow());
+        self.mode = AppMode::Popup;
+        self.connect_polling = true;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.connect_rx = Some(rx);
+
+        tokio::spawn(async move {
+            match copilot::start_device_flow().await {
+                Ok(state) => {
+                    let _ = tx.send(ConnectEvent::FlowStarted(state.clone()));
+                    // Poll for token
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(state.interval + 2)).await;
+                        match copilot::poll_for_token(&state).await {
+                            Ok(Some(_)) => {
+                                let _ = tx.send(ConnectEvent::TokenReceived);
+                                break;
+                            }
+                            Ok(None) => {
+                                let _ = tx.send(ConnectEvent::Pending);
+                            }
+                            Err(e) => {
+                                let _ = tx.send(ConnectEvent::Error(e.to_string()));
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(ConnectEvent::Error(e.to_string()));
+                }
+            }
+        });
+    }
+
+    fn set_model(&mut self, model_id: &str) {
+        let mut config = (*self.config).clone();
+        config.nano_model = model_id.to_string();
+        self.config = Arc::new(config);
+        self.rebuild_llm_client();
+    }
+
+    fn rebuild_llm_client(&mut self) {
+        // Try to rebuild with copilot token if available
+        let mut config = (*self.config).clone();
+        if let Some(token) = copilot::get_token() {
+            let base = copilot::copilot_base_url();
+            config.openai_api_key = Some(token.clone());
+            config.openai_base_url = format!("{}/chat/completions", base).replace("/chat/completions", "");
+            // Set to copilot endpoint
+            config.openai_base_url = base.clone();
+        }
+        self.config = Arc::new(config);
+        self.llm_client = LlmClient::new(&self.config).ok().map(Arc::new);
+    }
+
+    fn do_copy(&mut self) {
+        if let Some(ref mut clipboard) = self.clipboard {
+            let text: String = self.message_list.messages.iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let _ = clipboard.set_text(text);
+        }
+    }
+
+    fn do_paste(&mut self) {
+        if let Some(ref mut clipboard) = self.clipboard {
+            if let Ok(text) = clipboard.get_text() {
+                self.input_bar.insert_str(&text);
             }
         }
     }
@@ -370,24 +900,31 @@ impl App {
                 msg_type: MessageType::Warning,
                 content: "Agent is currently running. Please wait.".to_string(),
                 timestamp: None,
+                collapsed: false,
             });
             return;
+        }
+
+        // Rebuild client if needed (e.g., just connected)
+        if self.llm_client.is_none() {
+            self.rebuild_llm_client();
         }
 
         let Some(ref llm_client) = self.llm_client else {
             self.message_list.add_message(ChatMessage {
                 msg_type: MessageType::Error,
-                content: "No LLM API key configured. Set OPENAI_API_KEY or ANTHROPIC_API_KEY.".to_string(),
+                content: "No LLM configured. Use /connect or set API keys.".to_string(),
                 timestamp: None,
+                collapsed: false,
             });
             return;
         };
 
-        // Add user message to display
         self.message_list.add_message(ChatMessage {
             msg_type: MessageType::User,
             content: prompt.clone(),
             timestamp: None,
+            collapsed: false,
         });
 
         self.kms.task.original_prompt = prompt.clone();
@@ -395,7 +932,6 @@ impl App {
         self.status.status = AgentStatus::Preparing;
         self.spinner.label = "preparing...".to_string();
 
-        // Start agent in background
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         self.agent_rx = Some(event_rx);
 
@@ -405,11 +941,10 @@ impl App {
         let kpms = self.kpms.clone();
         let kkm = self.kkm.clone();
         let mut kms = self.kms.clone();
+        let pinned = self.input_bar.pinned_files.clone();
 
         tokio::spawn(async move {
-            // Phase 1: Preparation (fast-path or KLM)
-            let prep = if let Some(fast) = preparation::try_fast_path(&prompt, &project_dir) {
-                let _ = event_tx.send(AgentEvent::TextDelta(String::new()));
+            let mut prep = if let Some(fast) = preparation::try_fast_path(&prompt, &project_dir) {
                 fast
             } else {
                 match preparation::run_preparation(&llm_client, &prompt, &kms, &kpms, &kkm, &project_dir).await {
@@ -421,7 +956,13 @@ impl App {
                 }
             };
 
-            // Update KMS from preparation
+            // Add pinned files to preload
+            for file in &pinned {
+                if !prep.files_to_preload.contains(file) {
+                    prep.files_to_preload.push(file.clone());
+                }
+            }
+
             kms.task.goal = prep.kms_updates.goal.clone();
             kms.task.classification = prep.task_classification.clone();
             for (i, sub) in prep.kms_updates.sub_tasks.iter().enumerate() {
@@ -433,10 +974,6 @@ impl App {
                 });
             }
 
-            // Shizuka status message
-            let _ = event_tx.send(AgentEvent::TextDelta(String::new()));
-
-            // Phase 2: Nano execution
             let agent = NanoAgent::new(config, llm_client, project_dir, 0);
             match agent.run(&prep, &mut kms, &kpms, &kkm, event_tx.clone()).await {
                 Ok(_) => {}
@@ -448,24 +985,16 @@ impl App {
     }
 
     fn persist_session_data(&mut self) {
-        // Collect improvement signals
-        let prep_files: Vec<String> = Vec::new(); // Would need to store from last prep
+        let prep_files: Vec<String> = Vec::new();
         let misses = improvement::collect_preparation_misses(&self.kms, &prep_files, &[]);
         let record = improvement::collect_iteration_record(&self.kms);
-        improvement::persist_improvements(
-            &mut self.kpms,
-            &self.kms,
-            &misses,
-            &record,
-            &self.kms.session_id,
-        );
+        improvement::persist_improvements(&mut self.kpms, &self.kms, &misses, &record, &self.kms.session_id);
         let _ = self.kpms.save(&self.project_dir);
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
-        // Fill background
         frame.render_widget(
             ratatui::widgets::Block::default().style(Style::default().bg(Theme::bg())),
             area,
@@ -475,6 +1004,14 @@ impl App {
         let layout = AppLayout::compute(area, input_height);
 
         // Header
+        let auth_display = if copilot::is_authenticated() {
+            AuthDisplay::Connected(copilot::token_preview().unwrap_or_default())
+        } else if self.config.openai_api_key.is_some() || self.config.anthropic_api_key.is_some() {
+            AuthDisplay::Connected("API Key".to_string())
+        } else {
+            AuthDisplay::NotConnected
+        };
+
         header::render_header(
             frame,
             layout.header,
@@ -483,6 +1020,8 @@ impl App {
                 session_id: self.kms.session_id.clone(),
                 has_kpms: !self.kpms.learnings.is_empty() || !self.kpms.file_index.is_empty(),
                 has_kkm: !self.kkm.tools.is_empty(),
+                model_name: self.config.nano_model.clone(),
+                auth_status: auth_display,
             },
         );
 
@@ -495,7 +1034,7 @@ impl App {
         // Status bar
         status_bar::render_status_bar(frame, layout.status, &self.status);
 
-        // Popup overlay
+        // Popup overlay (last, on top of everything)
         if let Some(ref popup) = self.popup {
             popup.render(frame, area);
         }

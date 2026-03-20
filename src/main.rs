@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 mod app;
+mod auth;
 mod config;
 mod llm;
 mod memory;
@@ -20,7 +21,6 @@ use tui::event;
 async fn main() -> anyhow::Result<()> {
     let args = CliArgs::parse();
 
-    // Setup logging
     if args.debug {
         tracing_subscriber::fmt()
             .with_env_filter("hakari=debug")
@@ -37,20 +37,19 @@ async fn main() -> anyhow::Result<()> {
 
     let mut app = App::new(project_dir, config);
 
-    // Main event loop
     while app.running {
         terminal.draw(|frame| {
             app.render(frame);
         })?;
 
-        let timeout = if app.agent_running {
-            Duration::from_millis(50) // Fast ticks during agent execution for smooth streaming
+        let timeout = if app.agent_running || app.connect_polling {
+            Duration::from_millis(50)
         } else {
-            Duration::from_millis(100) // Normal tick rate
+            Duration::from_millis(80)
         };
 
-        if let Some(event) = event::poll_event(timeout)? {
-            app.handle_event(event);
+        if let Some(evt) = event::poll_event(timeout)? {
+            app.handle_event(evt);
         }
     }
 

@@ -1,0 +1,104 @@
+use crate::project::file_tree;
+use std::path::Path;
+
+#[derive(Debug, Clone)]
+pub struct SlashCommand {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub args: &'static str,
+}
+
+pub const COMMANDS: &[SlashCommand] = &[
+    SlashCommand { name: "/model", description: "Select AI model", args: "[model-name]" },
+    SlashCommand { name: "/models", description: "List available models", args: "" },
+    SlashCommand { name: "/connect", description: "Connect to GitHub Copilot", args: "" },
+    SlashCommand { name: "/settings", description: "Open settings", args: "" },
+    SlashCommand { name: "/clear", description: "Clear chat history", args: "" },
+    SlashCommand { name: "/compact", description: "Compact thinking/traces", args: "" },
+    SlashCommand { name: "/help", description: "Show help & key bindings", args: "" },
+    SlashCommand { name: "/status", description: "Show session status", args: "" },
+    SlashCommand { name: "/reset", description: "Reset session memory", args: "" },
+    SlashCommand { name: "/undo", description: "Undo last file change", args: "" },
+    SlashCommand { name: "/diff", description: "Show all changes this session", args: "" },
+    SlashCommand { name: "/export", description: "Export chat to file", args: "[path]" },
+    SlashCommand { name: "/pin", description: "Pin a file to context", args: "<file>" },
+    SlashCommand { name: "/unpin", description: "Unpin a file from context", args: "<file>" },
+    SlashCommand { name: "/files", description: "List pinned files", args: "" },
+    SlashCommand { name: "/cost", description: "Show token usage & cost", args: "" },
+    SlashCommand { name: "/theme", description: "Toggle light/dark theme", args: "" },
+    SlashCommand { name: "/quit", description: "Exit HAKARI", args: "" },
+];
+
+pub fn match_commands(input: &str) -> Vec<&'static SlashCommand> {
+    if !input.starts_with('/') {
+        return Vec::new();
+    }
+    let query = input.to_lowercase();
+    COMMANDS.iter().filter(|cmd| cmd.name.starts_with(&query)).collect()
+}
+
+pub fn is_command(input: &str) -> bool {
+    let trimmed = input.trim();
+    COMMANDS.iter().any(|cmd| {
+        trimmed == cmd.name || trimmed.starts_with(&format!("{} ", cmd.name))
+    })
+}
+
+pub fn parse_command(input: &str) -> Option<(&str, &str)> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
+    let cmd = parts[0];
+    let args = if parts.len() > 1 { parts[1].trim() } else { "" };
+    Some((cmd, args))
+}
+
+pub fn match_files(query: &str, project_dir: &Path) -> Vec<String> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let entries = file_tree::build_file_tree(project_dir, 1000);
+    let query_lower = query.to_lowercase();
+    entries
+        .iter()
+        .filter(|e| !e.is_dir)
+        .filter(|e| e.path.to_lowercase().contains(&query_lower))
+        .take(12)
+        .map(|e| e.path.clone())
+        .collect()
+}
+
+pub fn extract_at_mentions(input: &str) -> Vec<String> {
+    let mut mentions = Vec::new();
+    let mut i = 0;
+    let chars: Vec<char> = input.chars().collect();
+    while i < chars.len() {
+        if chars[i] == '@' {
+            let start = i + 1;
+            let mut end = start;
+            while end < chars.len() && !chars[end].is_whitespace() {
+                end += 1;
+            }
+            if end > start {
+                mentions.push(chars[start..end].iter().collect::<String>());
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    mentions
+}
+
+pub fn get_current_at_query(input: &str, cursor_pos: usize) -> Option<String> {
+    let before = if cursor_pos <= input.len() { &input[..cursor_pos] } else { input };
+    if let Some(at_pos) = before.rfind('@') {
+        let after_at = &before[at_pos + 1..];
+        if !after_at.contains(' ') {
+            return Some(after_at.to_string());
+        }
+    }
+    None
+}
