@@ -1,0 +1,202 @@
+use super::StreamEvent;
+use crate::llm::messages::{Message, Role, ToolCall};
+use reqwest::Client;
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+
+pub struct OpenAiProvider {
+    client: Client,
+    api_key: String,
+    base_url: String,
+    model: String,
+}
+
+impl OpenAiProvider {
+    pub fn new(api_key: String, base_url: String, model: String) -> Self {
+        Self {
+            client: Client::new(),
+            api_key,
+            base_url,
+            model,
+        }
+    }
+
+    fn convert_messages(&self, messages: &[Message]) -> Vec<Value> {
+        messages.iter().map(|msg| {
+            let mut obj = json!({
+                "role": match msg.role {
+                    Role::System => "system",
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                    Role::Tool => "tool",
+                },
+                "content": msg.content.to_text_string(),
+            });
+            if let Some(tool_calls) = &msg.tool_calls {
+                obj["tool_calls"] = json!(tool_calls.iter().map(|tc| json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": tc.arguments.to_string(),
+                    }
+                })).collect::<Vec<_>>());
+            }
+            if let Some(tool_call_id) = &msg.tool_call_id {
+                obj["tool_call_id"] = json!(tool_call_id);
+            }
+            obj
+        }).collect()
+    }
+
+    pub async fn chat(
+        &self,
+        messages: &[Message],
+        tools: &[Value],
+        stream_tx: Option<mpsc::UnboundedSender<StreamEvent>>,
+    ) -> anyhow::Result<(String, Vec<ToolCall>)> {
+        let converted_messages = self.convert_messages(messages);
+
+        let mut body = json!({
+            "model": self.model,
+            "messages": converted_messages,
+            "stream": stream_tx.is_some(),
+        });
+
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
+        }
+
+        let response = self.client
+            .post(format!("{}/chat/completions", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenAI API error {}: {}", status, error_body);
+        }
+
+        if let Some(tx) = stream_tx {
+            let mut text_content = String::new();
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut current_tool_args = String::new();
+            let mut current_tool_idx: Option<usize> = None;
+
+            let bytes_stream = response.bytes_stream();
+            use futures::StreamExt;
+            let mut stream = bytes_stream;
+            let mut buffer = String::new();
+
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(line_end) = buffer.find('\n') {
+                    let line = buffer[..line_end].trim().to_string();
+                    buffer = buffer[line_end + 1..].to_string();
+
+                    if line.is_empty() || line == "data: [DONE]" {
+                        if line == "data: [DONE]" {
+                            if let Some(idx) = current_tool_idx.take() {
+                                if let Some(tc) = tool_calls.get_mut(idx) {
+                                    tc.arguments = serde_json::from_str(&current_tool_args)
+                                        .unwrap_or(json!(current_tool_args));
+                                }
+                                current_tool_args.clear();
+                                let _ = tx.send(StreamEvent::ToolCallEnd);
+                            }
+                            let _ = tx.send(StreamEvent::Done);
+                        }
+                        continue;
+                    }
+
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if let Ok(parsed) = serde_json::from_str::<Value>(data) {
+                            if let Some(choices) = parsed["choices"].as_array() {
+                                for choice in choices {
+                                    let delta = &choice["delta"];
+
+                                    if let Some(content) = delta["content"].as_str() {
+                                        text_content.push_str(content);
+                                        let _ = tx.send(StreamEvent::TextDelta(content.to_string()));
+                                    }
+
+                                    if let Some(tcs) = delta["tool_calls"].as_array() {
+                                        for tc in tcs {
+                                            let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+                                            if let Some(func) = tc.get("function") {
+                                                if let Some(name) = func["name"].as_str() {
+                                                    let id = tc["id"].as_str().unwrap_or("").to_string();
+                                                    while tool_calls.len() <= idx {
+                                                        tool_calls.push(ToolCall {
+                                                            id: String::new(),
+                                                            name: String::new(),
+                                                            arguments: json!({}),
+                                                        });
+                                                    }
+                                                    tool_calls[idx].id = id.clone();
+                                                    tool_calls[idx].name = name.to_string();
+
+                                                    if let Some(prev_idx) = current_tool_idx.take() {
+                                                        if let Some(prev_tc) = tool_calls.get_mut(prev_idx) {
+                                                            prev_tc.arguments = serde_json::from_str(&current_tool_args)
+                                                                .unwrap_or(json!(current_tool_args));
+                                                        }
+                                                        current_tool_args.clear();
+                                                        let _ = tx.send(StreamEvent::ToolCallEnd);
+                                                    }
+                                                    current_tool_idx = Some(idx);
+                                                    let _ = tx.send(StreamEvent::ToolCallStart {
+                                                        id,
+                                                        name: name.to_string(),
+                                                    });
+                                                }
+                                                if let Some(args) = func["arguments"].as_str() {
+                                                    current_tool_args.push_str(args);
+                                                    let _ = tx.send(StreamEvent::ToolCallArgumentsDelta(args.to_string()));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(idx) = current_tool_idx.take() {
+                if let Some(tc) = tool_calls.get_mut(idx) {
+                    tc.arguments = serde_json::from_str(&current_tool_args)
+                        .unwrap_or(json!(current_tool_args));
+                }
+                let _ = tx.send(StreamEvent::ToolCallEnd);
+            }
+            let _ = tx.send(StreamEvent::Done);
+
+            Ok((text_content, tool_calls))
+        } else {
+            let response_body: Value = response.json().await?;
+            let choice = &response_body["choices"][0]["message"];
+            let text = choice["content"].as_str().unwrap_or("").to_string();
+
+            let mut tool_calls = Vec::new();
+            if let Some(tcs) = choice["tool_calls"].as_array() {
+                for tc in tcs {
+                    let id = tc["id"].as_str().unwrap_or("").to_string();
+                    let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+                    let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
+                    let arguments: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
+                    tool_calls.push(ToolCall { id, name, arguments });
+                }
+            }
+
+            Ok((text, tool_calls))
+        }
+    }
+}
