@@ -22,8 +22,37 @@ pub fn get_tool_definitions_openai() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "Grep",
+                "description": "Search code intelligently when you know a concept, symbol, or phrase but not the exact file. Prefer this over reading many files. Returns matching lines with context and suggested files when nothing matches.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Text or regex-like query to search for. Use exact identifiers, error text, command names, struct names, CSS classes, or phrases."
+                        },
+                        "file_glob": {
+                            "type": "string",
+                            "description": "Optional glob such as '*.rs' or 'src/**/*.rs' to narrow the search."
+                        },
+                        "context_lines": {
+                            "type": "integer",
+                            "description": "Optional number of context lines around each match."
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Optional cap on returned matches."
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "Write",
-                "description": "Writes the given content to the specified file. Creates the file if it doesn't exist. Creates parent directories if needed. Returns a confirmation with any validation notes.",
+                "description": "Writes the given content to the specified file. Smart behavior includes no-op detection, line-ending preservation, diff previews, related test discovery, and syntax validation for supported types.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -99,8 +128,34 @@ pub fn get_tool_definitions_anthropic() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "Grep",
+            "description": "Search code intelligently when you know a concept, symbol, or phrase but not the exact file. Prefer this over reading many files. Returns matching lines with context and suggested files when nothing matches.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Text or regex-like query to search for. Use exact identifiers, error text, command names, struct names, CSS classes, or phrases."
+                    },
+                    "file_glob": {
+                        "type": "string",
+                        "description": "Optional glob such as '*.rs' or 'src/**/*.rs' to narrow the search."
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "Optional number of context lines around each match."
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Optional cap on returned matches."
+                    }
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
             "name": "Write",
-            "description": "Writes the given content to the specified file. Creates the file if it doesn't exist. Creates parent directories if needed. Returns a confirmation with any validation notes.",
+            "description": "Writes the given content to the specified file. Smart behavior includes no-op detection, line-ending preservation, diff previews, related test discovery, and syntax validation for supported types.",
             "input_schema": {
                 "type": "object",
                 "properties": {

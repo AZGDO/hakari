@@ -23,6 +23,10 @@ pub enum AgentEvent {
     ThinkingStart,
     TextDelta(String),
     Trace(String),
+    ToolOutputDelta {
+        name: String,
+        chunk: String,
+    },
     ToolCallStart {
         name: String,
         id: String,
@@ -206,8 +210,43 @@ impl NanoAgent {
 
             // Execute each tool call through interceptor
             for tc in &tool_calls {
-                let intercept_result =
-                    interceptor.intercept_tool_call(tc, &self.project_dir, kms, kpms, kkm);
+                let intercept_result = {
+                    let (tool_stream_tx, mut tool_stream_rx) = mpsc::unbounded_channel::<String>();
+                    let intercept_fut = interceptor.intercept_tool_call(
+                        tc,
+                        &self.project_dir,
+                        kms,
+                        kpms,
+                        kkm,
+                        if tc.name == "Execute" {
+                            Some(tool_stream_tx)
+                        } else {
+                            None
+                        },
+                    );
+                    tokio::pin!(intercept_fut);
+
+                    loop {
+                        tokio::select! {
+                            maybe_chunk = tool_stream_rx.recv() => {
+                                match maybe_chunk {
+                                    Some(chunk) => {
+                                        let _ = event_tx.send(AgentEvent::ToolOutputDelta {
+                                            name: tc.name.clone(),
+                                            chunk,
+                                        });
+                                    }
+                                    None => continue,
+                                }
+                            }
+                            result = &mut intercept_fut => {
+                                break result;
+                            }
+                        }
+                    }
+                };
+                let step = kms.steps.current;
+                let context_tokens = kms.context.total_tokens_estimate;
 
                 // Send warnings
                 for warning in &intercept_result.injected_warnings {
@@ -219,8 +258,8 @@ impl NanoAgent {
                     result: intercept_result.tool_result.output.clone(),
                     success: intercept_result.tool_result.success,
                     metadata: intercept_result.tool_result.metadata.clone(),
-                    step: kms.steps.current,
-                    context_tokens: kms.context.total_tokens_estimate,
+                    step,
+                    context_tokens,
                 });
 
                 // Handle confirmation needed

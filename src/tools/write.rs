@@ -12,6 +12,8 @@ pub fn execute_write(
     kpms: &Kpms,
 ) -> ToolResult {
     let full_path = resolve_path(project_dir, path);
+    let original = std::fs::read_to_string(&full_path).ok();
+    let normalized_content = normalize_for_existing_file(original.as_deref(), content);
 
     if !full_path.starts_with(project_dir) {
         return ToolResult {
@@ -23,7 +25,7 @@ pub fn execute_write(
 
     // Syntax validation for known file types
     let ext = full_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if let Some(syntax_error) = check_syntax(ext, content) {
+    if let Some(syntax_error) = check_syntax(ext, &normalized_content) {
         return ToolResult {
             success: false,
             output: format!("Write blocked — syntax error: {}", syntax_error),
@@ -34,8 +36,16 @@ pub fn execute_write(
         };
     }
 
-    // Read original content for diff
-    let original = std::fs::read_to_string(&full_path).ok();
+    if original.as_deref() == Some(normalized_content.as_str()) {
+        return ToolResult {
+            success: true,
+            output: format!("✓ No-op write: {} already matches requested content", path),
+            metadata: ToolResultMetadata {
+                file_path: Some(path.to_string()),
+                ..Default::default()
+            },
+        };
+    }
 
     // Create parent directories
     if let Some(parent) = full_path.parent() {
@@ -51,7 +61,7 @@ pub fn execute_write(
     }
 
     // Write file
-    if let Err(e) = std::fs::write(&full_path, content) {
+    if let Err(e) = std::fs::write(&full_path, &normalized_content) {
         return ToolResult {
             success: false,
             output: format!("Error writing file: {}", e),
@@ -65,12 +75,15 @@ pub fn execute_write(
     // Generate diff summary
     let diff_preview = original
         .as_ref()
-        .map(|orig| generate_unified_diff(path, orig, content));
+        .map(|orig| generate_unified_diff(path, orig, &normalized_content));
 
     let diff_summary = if let Some(ref orig) = original {
-        generate_diff_summary(orig, content)
+        generate_diff_summary(orig, &normalized_content)
     } else {
-        format!("New file created ({} lines)", content.lines().count())
+        format!(
+            "New file created ({} lines)",
+            normalized_content.lines().count()
+        )
     };
 
     // Run lint checks
@@ -79,9 +92,15 @@ pub fn execute_write(
     // Detect related tests
     let related_tests = detect_related_tests(project_dir, path);
 
-    let line_count = content.lines().count();
+    let line_count = normalized_content.lines().count();
     let mut output = format!("✓ Written: {} ({} lines)\n", path, line_count);
     output.push_str(&format!("  {}\n", diff_summary));
+
+    if let Some(ref orig) = original {
+        if let Some(rewrite_warning) = large_rewrite_warning(orig, &normalized_content) {
+            output.push_str(&format!("  {}\n", rewrite_warning));
+        }
+    }
 
     if let Some(diff_preview) = &diff_preview {
         let preview_lines: Vec<&str> = diff_preview.lines().take(18).collect();
@@ -207,6 +226,52 @@ fn generate_unified_diff(path: &str, original: &str, new: &str) -> String {
         .context_radius(3)
         .header(&format!("a/{}", path), &format!("b/{}", path))
         .to_string()
+}
+
+fn normalize_for_existing_file(original: Option<&str>, content: &str) -> String {
+    let unix_normalized = content.replace("\r\n", "\n");
+    let mut normalized = match detect_line_ending(original) {
+        Some("\r\n") => unix_normalized.replace('\n', "\r\n"),
+        _ => unix_normalized,
+    };
+
+    if original.map(|value| value.ends_with('\n')).unwrap_or(false) && !normalized.ends_with('\n') {
+        normalized.push('\n');
+    }
+
+    normalized
+}
+
+fn detect_line_ending(original: Option<&str>) -> Option<&'static str> {
+    let original = original?;
+    if original.contains("\r\n") {
+        Some("\r\n")
+    } else {
+        Some("\n")
+    }
+}
+
+fn large_rewrite_warning(original: &str, new: &str) -> Option<String> {
+    let old_lines = original.lines().count();
+    let new_lines = new.lines().count();
+    if old_lines == 0 || new_lines == 0 {
+        return None;
+    }
+
+    let diff = TextDiff::from_lines(original, new);
+    let changed_lines = diff
+        .iter_all_changes()
+        .filter(|change| !matches!(change.tag(), ChangeTag::Equal))
+        .count();
+    let total = old_lines.max(new_lines);
+    if changed_lines * 100 / total.max(1) >= 70 {
+        Some(format!(
+            "Warning: this write rewrote a large portion of the file ({} changed line(s) across ~{} line(s))",
+            changed_lines, total
+        ))
+    } else {
+        None
+    }
 }
 
 fn run_lint_check(_project_dir: &Path, _file_path: &Path, kpms: &Kpms) -> Vec<String> {

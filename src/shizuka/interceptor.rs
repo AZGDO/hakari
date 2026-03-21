@@ -8,6 +8,7 @@ use crate::memory::kpms::Kpms;
 use crate::tools::execute::ExecuteResult;
 use crate::tools::{self, ToolResult};
 use std::path::Path;
+use tokio::sync::mpsc;
 
 pub struct Interceptor {
     pub loop_detector: LoopDetector,
@@ -31,13 +32,14 @@ impl Interceptor {
         }
     }
 
-    pub fn intercept_tool_call(
+    pub async fn intercept_tool_call(
         &mut self,
         tool_call: &ToolCall,
         project_dir: &Path,
         kms: &mut Kms,
         kpms: &Kpms,
         kkm: &Kkm,
+        execute_stream_tx: Option<mpsc::UnboundedSender<String>>,
     ) -> InterceptResult {
         let mut warnings = Vec::new();
 
@@ -79,6 +81,37 @@ impl Interceptor {
                 let result = tools::read::execute_read(project_dir, path, kms, kpms);
                 (result, false, None)
             }
+            "Grep" => {
+                let query = tool_call
+                    .arguments
+                    .get("query")
+                    .or_else(|| tool_call.arguments.get("pattern"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let file_glob = tool_call
+                    .arguments
+                    .get("file_glob")
+                    .and_then(|v| v.as_str());
+                let context_lines = tool_call
+                    .arguments
+                    .get("context_lines")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
+                let max_results = tool_call
+                    .arguments
+                    .get("max_results")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
+                let result = tools::grep::execute_grep(
+                    project_dir,
+                    query,
+                    file_glob,
+                    context_lines,
+                    max_results,
+                    kpms,
+                );
+                (result, false, None)
+            }
             "Write" => {
                 let path = tool_call
                     .arguments
@@ -99,7 +132,9 @@ impl Interceptor {
                     .get("command")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let exec_result = tools::execute::execute_command(project_dir, command, kkm);
+                let exec_result =
+                    tools::execute::execute_command(project_dir, command, kkm, execute_stream_tx)
+                        .await;
                 (
                     exec_result.tool_result,
                     exec_result.needs_confirmation,
@@ -134,6 +169,13 @@ impl Interceptor {
             "Read" => tool_call
                 .arguments
                 .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            "Grep" => tool_call
+                .arguments
+                .get("query")
+                .or_else(|| tool_call.arguments.get("pattern"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),

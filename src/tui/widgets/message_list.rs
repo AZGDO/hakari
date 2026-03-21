@@ -8,6 +8,9 @@ pub enum MessageType {
     Nano,
     Shizuka,
     Thinking,
+    ToolStreaming {
+        name: String,
+    },
     ToolResult {
         name: String,
         success: bool,
@@ -73,6 +76,56 @@ impl MessageList {
                 self.smooth_scroll_active = true;
             }
         }
+    }
+
+    pub fn begin_tool_stream(&mut self, name: &str) {
+        let should_create = !matches!(
+            self.messages.last().map(|msg| &msg.msg_type),
+            Some(MessageType::ToolStreaming { name: active }) if active == name
+        );
+
+        if should_create {
+            self.add_message(ChatMessage {
+                msg_type: MessageType::ToolStreaming {
+                    name: name.to_string(),
+                },
+                content: String::new(),
+                timestamp: None,
+                collapsed: false,
+            });
+        }
+    }
+
+    pub fn append_to_tool_stream(&mut self, name: &str, text: &str) {
+        if let Some(last) = self.messages.last_mut() {
+            if matches!(&last.msg_type, MessageType::ToolStreaming { name: active } if active == name)
+            {
+                last.content.push_str(text);
+                if self.auto_scroll {
+                    self.target_scroll = usize::MAX;
+                    self.smooth_scroll_active = true;
+                }
+                return;
+            }
+        }
+
+        self.begin_tool_stream(name);
+        self.append_to_tool_stream(name, text);
+    }
+
+    pub fn finish_tool_stream(&mut self, name: &str, replacement: ChatMessage) -> bool {
+        if let Some(last) = self.messages.last_mut() {
+            if matches!(&last.msg_type, MessageType::ToolStreaming { name: active } if active == name)
+            {
+                *last = replacement;
+                if self.auto_scroll {
+                    self.scroll_to_bottom();
+                }
+                return true;
+            }
+        }
+
+        false
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
@@ -285,6 +338,49 @@ impl MessageList {
                             );
                         }
                     }
+                    push_blank(&mut lines, &mut line_map, message_index);
+                }
+                MessageType::ToolStreaming { name } => {
+                    push_line(
+                        &mut lines,
+                        &mut line_map,
+                        message_index,
+                        Line::from(vec![
+                            Span::styled("  ⏵ ", Style::default().fg(Theme::yellow())),
+                            Span::styled(
+                                format!("{} (live)", name),
+                                Style::default()
+                                    .fg(Theme::yellow())
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]),
+                    );
+
+                    for line in msg.content.lines().take(48) {
+                        push_line(
+                            &mut lines,
+                            &mut line_map,
+                            message_index,
+                            Line::from(vec![
+                                Span::styled("    ", Style::default()),
+                                Span::styled(line.to_string(), Style::default().fg(Theme::text())),
+                            ]),
+                        );
+                    }
+
+                    let total = msg.content.lines().count();
+                    if total > 48 {
+                        push_line(
+                            &mut lines,
+                            &mut line_map,
+                            message_index,
+                            Line::from(Span::styled(
+                                format!("    ... {} more live lines", total - 48),
+                                Style::default().fg(Theme::text_muted()),
+                            )),
+                        );
+                    }
+
                     push_blank(&mut lines, &mut line_map, message_index);
                 }
                 MessageType::ToolResult {

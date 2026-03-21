@@ -282,12 +282,21 @@ impl InputBar {
         }
     }
 
-    pub fn line_count(&self) -> usize {
-        self.content.lines().count().max(1)
+    pub fn wrapped_line_count(&self, width: usize) -> usize {
+        let usable_width = width.max(1);
+        let mut total = 0usize;
+
+        for line in self.content.split('\n') {
+            let line_width = line.chars().count();
+            total += line_width.div_ceil(usable_width).max(1);
+        }
+
+        total.max(1)
     }
 
-    pub fn desired_height(&self) -> u16 {
-        (self.line_count() as u16 + 2).min(10)
+    pub fn desired_height_for_width(&self, total_width: u16) -> u16 {
+        let inner_width = total_width.saturating_sub(2) as usize;
+        (self.wrapped_line_count(inner_width) as u16 + 2).min(12)
     }
 
     pub fn suggestion_popup_area(&self, input_area: Rect) -> Option<Rect> {

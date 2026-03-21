@@ -2,6 +2,9 @@ use super::{ToolResult, ToolResultMetadata};
 use crate::memory::kkm::Kkm;
 use std::path::Path;
 use std::time::Instant;
+use tokio::io::AsyncBufReadExt;
+use tokio::process::Command;
+use tokio::sync::mpsc;
 
 const BLOCKED_COMMANDS: &[&str] = &[
     "rm -rf /",
@@ -20,7 +23,12 @@ pub struct ExecuteResult {
     pub confirmation_message: Option<String>,
 }
 
-pub fn execute_command(project_dir: &Path, command: &str, kkm: &Kkm) -> ExecuteResult {
+pub async fn execute_command(
+    project_dir: &Path,
+    command: &str,
+    kkm: &Kkm,
+    stream_tx: Option<mpsc::UnboundedSender<String>>,
+) -> ExecuteResult {
     // Safety check
     for blocked in BLOCKED_COMMANDS {
         if command.contains(blocked) {
@@ -58,55 +66,114 @@ pub fn execute_command(project_dir: &Path, command: &str, kkm: &Kkm) -> ExecuteR
     let transformed = kkm.transform_command(command);
 
     // Determine timeout
-    let _timeout = determine_timeout(&transformed);
+    let timeout_secs = determine_timeout(&transformed);
 
     let start = Instant::now();
 
-    let output = std::process::Command::new("sh")
+    let mut child = match Command::new("sh")
         .arg("-c")
         .arg(&transformed)
         .current_dir(project_dir)
-        .output();
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            return ExecuteResult {
+                tool_result: ToolResult {
+                    success: false,
+                    output: format!("Failed to execute command: {}", e),
+                    metadata: ToolResultMetadata::default(),
+                },
+                needs_confirmation: false,
+                confirmation_message: None,
+            };
+        }
+    };
 
-    let elapsed = start.elapsed();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
 
-    match output {
-        Ok(output) => {
-            let exit_code = output.status.code().unwrap_or(-1);
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout_task = tokio::spawn(read_stream(stdout, false, stream_tx.clone()));
+    let stderr_task = tokio::spawn(read_stream(stderr, true, stream_tx.clone()));
 
+    let wait_result =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait()).await;
+
+    let status = match wait_result {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            return ExecuteResult {
+                tool_result: ToolResult {
+                    success: false,
+                    output: format!("Failed while waiting for command: {}", error),
+                    metadata: ToolResultMetadata::default(),
+                },
+                needs_confirmation: false,
+                confirmation_message: None,
+            };
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            if let Some(stream_tx) = &stream_tx {
+                let _ = stream_tx.send(format!(
+                    "\n[hakari] command timed out after {}s\n",
+                    timeout_secs
+                ));
+            }
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
+            let elapsed = start.elapsed();
             let formatted = format_command_output(
                 &transformed,
-                exit_code,
+                -1,
                 &stdout,
-                &stderr,
+                &format!("{}\nTimed out after {}s", stderr, timeout_secs),
                 elapsed.as_millis() as u64,
             );
 
-            ExecuteResult {
+            return ExecuteResult {
                 tool_result: ToolResult {
-                    success: exit_code == 0,
+                    success: false,
                     output: formatted,
                     metadata: ToolResultMetadata {
-                        exit_code: Some(exit_code),
+                        exit_code: Some(-1),
                         execution_time_ms: Some(elapsed.as_millis() as u64),
                         ..Default::default()
                     },
                 },
                 needs_confirmation: false,
                 confirmation_message: None,
-            }
+            };
         }
-        Err(e) => ExecuteResult {
-            tool_result: ToolResult {
-                success: false,
-                output: format!("Failed to execute command: {}", e),
-                metadata: ToolResultMetadata::default(),
+    };
+
+    let stdout = stdout_task.await.unwrap_or_default();
+    let stderr = stderr_task.await.unwrap_or_default();
+    let elapsed = start.elapsed();
+    let exit_code = status.code().unwrap_or(-1);
+
+    let formatted = format_command_output(
+        &transformed,
+        exit_code,
+        &stdout,
+        &stderr,
+        elapsed.as_millis() as u64,
+    );
+
+    ExecuteResult {
+        tool_result: ToolResult {
+            success: exit_code == 0,
+            output: formatted,
+            metadata: ToolResultMetadata {
+                exit_code: Some(exit_code),
+                execution_time_ms: Some(elapsed.as_millis() as u64),
+                ..Default::default()
             },
-            needs_confirmation: false,
-            confirmation_message: None,
         },
+        needs_confirmation: false,
+        confirmation_message: None,
     }
 }
 
@@ -237,4 +304,46 @@ fn try_parse_test_output(stdout: &str, stderr: &str) -> Option<String> {
     }
 
     None
+}
+
+async fn read_stream(
+    stream: Option<impl tokio::io::AsyncRead + Unpin>,
+    is_stderr: bool,
+    stream_tx: Option<mpsc::UnboundedSender<String>>,
+) -> String {
+    let Some(stream) = stream else {
+        return String::new();
+    };
+
+    let mut reader = tokio::io::BufReader::new(stream);
+    let mut buffer = String::new();
+    let mut collected = String::new();
+
+    loop {
+        buffer.clear();
+        match reader.read_line(&mut buffer).await {
+            Ok(0) => break,
+            Ok(_) => {
+                collected.push_str(&buffer);
+                if let Some(stream_tx) = &stream_tx {
+                    let chunk = if is_stderr {
+                        format!("[stderr] {}", buffer)
+                    } else {
+                        buffer.clone()
+                    };
+                    let _ = stream_tx.send(chunk);
+                }
+            }
+            Err(error) => {
+                let line = format!("[hakari] failed to read process output: {}\n", error);
+                collected.push_str(&line);
+                if let Some(stream_tx) = &stream_tx {
+                    let _ = stream_tx.send(line);
+                }
+                break;
+            }
+        }
+    }
+
+    collected
 }

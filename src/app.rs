@@ -731,9 +731,23 @@ impl App {
                         });
                     }
                 }
+                AgentEvent::Trace(trace) => {
+                    self.message_list.add_message(ChatMessage {
+                        msg_type: MessageType::Thinking,
+                        content: trace,
+                        timestamp: None,
+                        collapsed: true,
+                    });
+                }
+                AgentEvent::ToolOutputDelta { name, chunk } => {
+                    self.message_list.append_to_tool_stream(&name, &chunk);
+                }
                 AgentEvent::ToolCallStart { name, .. } => {
                     self.status.status = AgentStatus::ToolRunning(name.clone());
                     self.spinner.label = format!("{}...", name);
+                    if name == "Execute" {
+                        self.message_list.begin_tool_stream(&name);
+                    }
                 }
                 AgentEvent::ToolCallEnd {
                     name,
@@ -743,19 +757,26 @@ impl App {
                     step,
                     context_tokens,
                 } => {
-                    self.message_list.add_message(ChatMessage {
+                    let final_message = ChatMessage {
                         msg_type: MessageType::ToolResult {
-                            name,
+                            name: name.clone(),
                             success,
-                            file_path: metadata.file_path,
-                            diff: metadata.diff,
+                            file_path: metadata.file_path.clone(),
+                            diff: metadata.diff.clone(),
                             exit_code: metadata.exit_code,
                             duration_ms: metadata.execution_time_ms,
                         },
                         content: result,
                         timestamp: None,
                         collapsed: true,
-                    });
+                    };
+
+                    if !self
+                        .message_list
+                        .finish_tool_stream(&name, final_message.clone())
+                    {
+                        self.message_list.add_message(final_message);
+                    }
                     self.status.step = step;
                     self.status.context_tokens = context_tokens;
                 }
@@ -1697,7 +1718,7 @@ impl App {
             area,
         );
 
-        let input_height = self.input_bar.desired_height();
+        let input_height = self.input_bar.desired_height_for_width(area.width);
         let layout = AppLayout::compute(area, input_height);
         self.last_layout = Some(layout);
 

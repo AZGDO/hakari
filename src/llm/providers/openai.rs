@@ -83,9 +83,13 @@ impl OpenAiProvider {
             body["tools"] = json!(tools);
         }
 
-        if let Some(reasoning_effort) = &self.reasoning_effort {
-            body["reasoning_effort"] = json!(reasoning_effort);
+        if !self.is_copilot && supports_reasoning_effort(&self.model) {
+            if let Some(reasoning_effort) = &self.reasoning_effort {
+                body["reasoning_effort"] = json!(reasoning_effort);
+            }
         }
+
+        let request_was_streaming = stream_tx.is_some();
 
         let mut request = self
             .client
@@ -106,6 +110,19 @@ impl OpenAiProvider {
         if !response.status().is_success() {
             let status = response.status();
             let error_body = response.text().await.unwrap_or_default();
+
+            if self.is_copilot && request_was_streaming {
+                if let Ok((text, tool_calls)) = self.chat_without_stream(messages, tools).await {
+                    if let Some(tx) = stream_tx {
+                        if !text.is_empty() {
+                            let _ = tx.send(StreamEvent::TextDelta(text.clone()));
+                        }
+                        let _ = tx.send(StreamEvent::Done);
+                    }
+                    return Ok((text, tool_calls));
+                }
+            }
+
             anyhow::bail!("OpenAI API error {}: {}", status, error_body);
         }
 
@@ -214,30 +231,113 @@ impl OpenAiProvider {
                 }
                 let _ = tx.send(StreamEvent::ToolCallEnd);
             }
+
+            if self.is_copilot && text_content.is_empty() && tool_calls.is_empty() {
+                let (text, fallback_tool_calls) = self.chat_without_stream(messages, tools).await?;
+                if !text.is_empty() {
+                    let _ = tx.send(StreamEvent::TextDelta(text.clone()));
+                }
+                let _ = tx.send(StreamEvent::Done);
+                return Ok((text, fallback_tool_calls));
+            }
+
             let _ = tx.send(StreamEvent::Done);
 
             Ok((text_content, tool_calls))
         } else {
             let response_body: Value = response.json().await?;
-            let choice = &response_body["choices"][0]["message"];
-            let text = choice["content"].as_str().unwrap_or("").to_string();
-
-            let mut tool_calls = Vec::new();
-            if let Some(tcs) = choice["tool_calls"].as_array() {
-                for tc in tcs {
-                    let id = tc["id"].as_str().unwrap_or("").to_string();
-                    let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
-                    let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
-                    let arguments: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
-                    tool_calls.push(ToolCall {
-                        id,
-                        name,
-                        arguments,
-                    });
-                }
-            }
-
-            Ok((text, tool_calls))
+            Ok(parse_non_stream_response(&response_body))
         }
     }
+
+    async fn chat_without_stream(
+        &self,
+        messages: &[Message],
+        tools: &[Value],
+    ) -> anyhow::Result<(String, Vec<ToolCall>)> {
+        let converted_messages = self.convert_messages(messages);
+
+        let mut body = json!({
+            "model": self.model,
+            "messages": converted_messages,
+            "stream": false,
+        });
+
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
+        }
+
+        if !self.is_copilot && supports_reasoning_effort(&self.model) {
+            if let Some(reasoning_effort) = &self.reasoning_effort {
+                body["reasoning_effort"] = json!(reasoning_effort);
+            }
+        }
+
+        let mut request = self
+            .client
+            .post(format!("{}/chat/completions", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json");
+
+        if self.is_copilot {
+            request = request
+                .header("Copilot-Integration-Id", "vscode-chat")
+                .header("Editor-Version", "vscode/1.99.0")
+                .header("Editor-Plugin-Version", "copilot-chat/0.1.85")
+                .header("User-Agent", "hakari/0.1.0");
+        }
+
+        let response = request.json(&body).send().await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenAI API error {}: {}", status, error_body);
+        }
+
+        let response_body: Value = response.json().await?;
+        Ok(parse_non_stream_response(&response_body))
+    }
+}
+
+fn supports_reasoning_effort(model: &str) -> bool {
+    let lower = model.to_lowercase();
+    lower.contains("gpt") || lower.contains("o1") || lower.contains("o3") || lower.contains("o4")
+}
+
+fn extract_text_content(message: &Value) -> String {
+    if let Some(text) = message["content"].as_str() {
+        return text.to_string();
+    }
+
+    if let Some(blocks) = message["content"].as_array() {
+        return blocks
+            .iter()
+            .filter_map(|block| block["text"].as_str().or_else(|| block["content"].as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    String::new()
+}
+
+fn parse_non_stream_response(response_body: &Value) -> (String, Vec<ToolCall>) {
+    let choice = &response_body["choices"][0]["message"];
+    let text = extract_text_content(choice);
+
+    let mut tool_calls = Vec::new();
+    if let Some(tcs) = choice["tool_calls"].as_array() {
+        for tc in tcs {
+            let id = tc["id"].as_str().unwrap_or("").to_string();
+            let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+            let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
+            let arguments: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
+            tool_calls.push(ToolCall {
+                id,
+                name,
+                arguments,
+            });
+        }
+    }
+
+    (text, tool_calls)
 }
