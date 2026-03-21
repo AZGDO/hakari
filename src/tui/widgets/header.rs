@@ -1,7 +1,7 @@
-use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
 use crate::auth::copilot::CopilotUsage;
 use crate::tui::theme::Theme;
+use ratatui::prelude::*;
+use ratatui::widgets::Paragraph;
 
 pub struct HeaderData {
     pub project_name: String,
@@ -14,6 +14,7 @@ pub struct HeaderData {
     pub shizuka_model: String,
     pub auth_status: AuthDisplay,
     pub copilot_usage: Option<CopilotUsage>,
+    pub animation_frame: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -31,7 +32,10 @@ pub fn render_header(frame: &mut Frame, area: Rect, data: &HeaderData) {
 
     line1_spans.push(Span::styled(
         " HAKARI ",
-        Style::default().fg(Theme::mauve()).bg(bg).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Theme::mauve())
+            .bg(bg)
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC),
     ));
 
     line1_spans.push(Span::styled(
@@ -64,6 +68,13 @@ pub fn render_header(frame: &mut Frame, area: Rect, data: &HeaderData) {
                 Style::default().fg(color).bg(bg),
             ));
             right1.push(Span::styled(
+                format!("{:.0}% ", usage.percent_left),
+                Style::default()
+                    .fg(color)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            right1.push(Span::styled(
                 "\u{2588}".repeat(filled),
                 Style::default().fg(color).bg(bg),
             ));
@@ -77,9 +88,17 @@ pub fn render_header(frame: &mut Frame, area: Rect, data: &HeaderData) {
 
     match &data.auth_status {
         AuthDisplay::Connected(_) => {
+            let pulse = if (data.animation_frame / 6).is_multiple_of(2) {
+                "◉"
+            } else {
+                "●"
+            };
             right1.push(Span::styled(
-                " connected ",
-                Style::default().fg(Theme::green()).bg(bg),
+                format!(" {} connected ", pulse),
+                Style::default()
+                    .fg(Theme::green())
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         AuthDisplay::NotConnected => {
@@ -92,7 +111,10 @@ pub fn render_header(frame: &mut Frame, area: Rect, data: &HeaderData) {
     }
 
     if data.has_kpms {
-        right1.push(Span::styled("KPMS ", Style::default().fg(Theme::green()).bg(bg)));
+        right1.push(Span::styled(
+            "KPMS ",
+            Style::default().fg(Theme::green()).bg(bg),
+        ));
     }
 
     let left1_width: usize = line1_spans.iter().map(|s| s.width()).sum();
@@ -113,10 +135,16 @@ pub fn render_header(frame: &mut Frame, area: Rect, data: &HeaderData) {
         _ => Theme::text_dim(),
     };
 
-    line2_spans.push(Span::styled(" nano ", Style::default().fg(Theme::text_dim()).bg(dim_bg)));
     line2_spans.push(Span::styled(
-        format!("{}", data.model_name),
-        Style::default().fg(Theme::lavender()).bg(dim_bg),
+        " nano ",
+        Style::default().fg(Theme::text_dim()).bg(dim_bg),
+    ));
+    line2_spans.push(Span::styled(
+        data.model_name.to_string(),
+        Style::default()
+            .fg(Theme::lavender())
+            .bg(dim_bg)
+            .add_modifier(Modifier::BOLD),
     ));
     line2_spans.push(Span::styled(
         format!(" [{}]", data.model_category),
@@ -135,20 +163,30 @@ pub fn render_header(frame: &mut Frame, area: Rect, data: &HeaderData) {
         Style::default().fg(Theme::border()).bg(dim_bg),
     ));
 
-    line2_spans.push(Span::styled("shizuka ", Style::default().fg(Theme::text_dim()).bg(dim_bg)));
     line2_spans.push(Span::styled(
-        format!("{}", data.shizuka_model),
-        Style::default().fg(Theme::cyan()).bg(dim_bg),
+        "shizuka ",
+        Style::default().fg(Theme::text_dim()).bg(dim_bg),
     ));
+    line2_spans.push(Span::styled(
+        data.shizuka_model.to_string(),
+        Style::default()
+            .fg(Theme::cyan())
+            .bg(dim_bg)
+            .add_modifier(Modifier::BOLD),
+    ));
+
+    if data.has_kkm {
+        line2_spans.push(Span::styled(
+            "  │  tools learned",
+            Style::default().fg(Theme::green()).bg(dim_bg),
+        ));
+    }
 
     let left2_width: usize = line2_spans.iter().map(|s| s.width()).sum();
     let pad2 = (area.width as usize).saturating_sub(left2_width);
     line2_spans.push(Span::styled(" ".repeat(pad2), Style::default().bg(dim_bg)));
 
-    let lines = vec![
-        Line::from(line1_spans),
-        Line::from(line2_spans),
-    ];
+    let lines = vec![Line::from(line1_spans), Line::from(line2_spans)];
 
     let paragraph = Paragraph::new(lines).style(Style::default().bg(bg));
     frame.render_widget(paragraph, area);

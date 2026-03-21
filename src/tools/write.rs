@@ -63,6 +63,10 @@ pub fn execute_write(
     kms.record_file_write(path, original.clone());
 
     // Generate diff summary
+    let diff_preview = original
+        .as_ref()
+        .map(|orig| generate_unified_diff(path, orig, content));
+
     let diff_summary = if let Some(ref orig) = original {
         generate_diff_summary(orig, content)
     } else {
@@ -79,6 +83,20 @@ pub fn execute_write(
     let mut output = format!("✓ Written: {} ({} lines)\n", path, line_count);
     output.push_str(&format!("  {}\n", diff_summary));
 
+    if let Some(diff_preview) = &diff_preview {
+        let preview_lines: Vec<&str> = diff_preview.lines().take(18).collect();
+        if !preview_lines.is_empty() {
+            output.push_str("  Diff preview:\n");
+            for line in preview_lines {
+                output.push_str(&format!("    {}\n", line));
+            }
+            let total = diff_preview.lines().count();
+            if total > 18 {
+                output.push_str(&format!("    ... {} more diff lines\n", total - 18));
+            }
+        }
+    }
+
     if !lint_warnings.is_empty() {
         output.push_str(&format!(
             "  +{} lint warning(s) (non-blocking):\n",
@@ -90,10 +108,7 @@ pub fn execute_write(
     }
 
     if !related_tests.is_empty() {
-        output.push_str(&format!(
-            "  Related tests: {}\n",
-            related_tests.join(", ")
-        ));
+        output.push_str(&format!("  Related tests: {}\n", related_tests.join(", ")));
     }
 
     ToolResult {
@@ -102,6 +117,7 @@ pub fn execute_write(
         metadata: ToolResultMetadata {
             file_path: Some(path.to_string()),
             lines_changed: Some(diff_summary),
+            diff: diff_preview,
             lint_warnings,
             related_tests,
             ..Default::default()
@@ -185,6 +201,14 @@ fn generate_diff_summary(original: &str, new: &str) -> String {
     format!("{} (+{} -{} lines)", range_str, added, removed)
 }
 
+fn generate_unified_diff(path: &str, original: &str, new: &str) -> String {
+    TextDiff::from_lines(original, new)
+        .unified_diff()
+        .context_radius(3)
+        .header(&format!("a/{}", path), &format!("b/{}", path))
+        .to_string()
+}
+
 fn run_lint_check(_project_dir: &Path, _file_path: &Path, kpms: &Kpms) -> Vec<String> {
     // We attempt a quick lint only if we know the lint command
     if kpms.project.lint_command.is_empty() {
@@ -208,8 +232,12 @@ fn detect_related_tests(project_dir: &Path, file_path: &str) -> Vec<String> {
     let test_patterns = [
         parent.join(format!("{}.test.{}", stem, ext)),
         parent.join(format!("{}.spec.{}", stem, ext)),
-        parent.join("__tests__").join(format!("{}.test.{}", stem, ext)),
-        parent.join("__tests__").join(format!("{}.spec.{}", stem, ext)),
+        parent
+            .join("__tests__")
+            .join(format!("{}.test.{}", stem, ext)),
+        parent
+            .join("__tests__")
+            .join(format!("{}.spec.{}", stem, ext)),
         parent.join("tests").join(format!("{}.test.{}", stem, ext)),
     ];
 

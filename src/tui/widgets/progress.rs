@@ -1,5 +1,5 @@
-use ratatui::prelude::*;
 use crate::tui::theme::Theme;
+use ratatui::prelude::*;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 

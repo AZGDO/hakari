@@ -9,28 +9,116 @@ pub struct SlashCommand {
 }
 
 pub const COMMANDS: &[SlashCommand] = &[
-    SlashCommand { name: "/model", description: "Select nano AI model", args: "[model-name]" },
-    SlashCommand { name: "/shizuka", description: "Select shizuka model", args: "[model-name]" },
-    SlashCommand { name: "/reasoning", description: "Set reasoning level", args: "[level]" },
-    SlashCommand { name: "/models", description: "List available models", args: "" },
-    SlashCommand { name: "/modellist", description: "Show model assignments", args: "" },
-    SlashCommand { name: "/connect", description: "Connect to provider", args: "" },
-    SlashCommand { name: "/settings", description: "Open settings", args: "" },
-    SlashCommand { name: "/clear", description: "Clear chat", args: "" },
-    SlashCommand { name: "/compact", description: "Collapse traces", args: "" },
-    SlashCommand { name: "/help", description: "Show help", args: "" },
-    SlashCommand { name: "/status", description: "Session status", args: "" },
-    SlashCommand { name: "/reset", description: "Reset session", args: "" },
-    SlashCommand { name: "/undo", description: "Undo file changes", args: "" },
-    SlashCommand { name: "/diff", description: "Show changes", args: "" },
-    SlashCommand { name: "/export", description: "Export chat", args: "[path]" },
-    SlashCommand { name: "/pin", description: "Pin file to context", args: "<file>" },
-    SlashCommand { name: "/unpin", description: "Unpin file", args: "<file>" },
-    SlashCommand { name: "/files", description: "List pinned files", args: "" },
-    SlashCommand { name: "/cost", description: "Token usage", args: "" },
-    SlashCommand { name: "/reinstall", description: "Reinstall binary", args: "" },
-    SlashCommand { name: "/exit", description: "Exit HAKARI", args: "" },
-    SlashCommand { name: "/quit", description: "Exit HAKARI", args: "" },
+    SlashCommand {
+        name: "/model",
+        description: "Select nano AI model",
+        args: "[model-name]",
+    },
+    SlashCommand {
+        name: "/shizuka",
+        description: "Select shizuka model",
+        args: "[model-name]",
+    },
+    SlashCommand {
+        name: "/reasoning",
+        description: "Set reasoning level",
+        args: "[level]",
+    },
+    SlashCommand {
+        name: "/models",
+        description: "List available models",
+        args: "",
+    },
+    SlashCommand {
+        name: "/modellist",
+        description: "Show model assignments",
+        args: "",
+    },
+    SlashCommand {
+        name: "/connect",
+        description: "Connect to provider",
+        args: "",
+    },
+    SlashCommand {
+        name: "/settings",
+        description: "Open settings",
+        args: "",
+    },
+    SlashCommand {
+        name: "/clear",
+        description: "Clear chat",
+        args: "",
+    },
+    SlashCommand {
+        name: "/compact",
+        description: "Collapse traces",
+        args: "",
+    },
+    SlashCommand {
+        name: "/help",
+        description: "Show help",
+        args: "",
+    },
+    SlashCommand {
+        name: "/status",
+        description: "Session status",
+        args: "",
+    },
+    SlashCommand {
+        name: "/reset",
+        description: "Reset session",
+        args: "",
+    },
+    SlashCommand {
+        name: "/undo",
+        description: "Undo file changes",
+        args: "",
+    },
+    SlashCommand {
+        name: "/diff",
+        description: "Show changes",
+        args: "",
+    },
+    SlashCommand {
+        name: "/export",
+        description: "Export chat",
+        args: "[path]",
+    },
+    SlashCommand {
+        name: "/pin",
+        description: "Pin file to context",
+        args: "<file>",
+    },
+    SlashCommand {
+        name: "/unpin",
+        description: "Unpin file",
+        args: "<file>",
+    },
+    SlashCommand {
+        name: "/files",
+        description: "List pinned files",
+        args: "",
+    },
+    SlashCommand {
+        name: "/cost",
+        description: "Token usage",
+        args: "",
+    },
+    SlashCommand {
+        name: "/reinstall",
+        description: "Reinstall binary",
+        args: "",
+    },
+    SlashCommand {
+        name: "/exit",
+        description: "Exit HAKARI",
+        args: "",
+    },
+    SlashCommand {
+        name: "/quit",
+        description: "Exit HAKARI",
+        args: "",
+    },
 ];
 
 pub fn match_commands(input: &str) -> Vec<&'static SlashCommand> {
@@ -38,14 +126,17 @@ pub fn match_commands(input: &str) -> Vec<&'static SlashCommand> {
         return Vec::new();
     }
     let query = input.to_lowercase();
-    COMMANDS.iter().filter(|cmd| cmd.name.starts_with(&query)).collect()
+    COMMANDS
+        .iter()
+        .filter(|cmd| cmd.name.starts_with(&query))
+        .collect()
 }
 
 pub fn is_command(input: &str) -> bool {
     let trimmed = input.trim();
-    COMMANDS.iter().any(|cmd| {
-        trimmed == cmd.name || trimmed.starts_with(&format!("{} ", cmd.name))
-    })
+    COMMANDS
+        .iter()
+        .any(|cmd| trimmed == cmd.name || trimmed.starts_with(&format!("{} ", cmd.name)))
 }
 
 pub fn parse_command(input: &str) -> Option<(&str, &str)> {
@@ -97,7 +188,11 @@ pub fn extract_at_mentions(input: &str) -> Vec<String> {
 }
 
 pub fn get_current_at_query(input: &str, cursor_pos: usize) -> Option<String> {
-    let before = if cursor_pos <= input.len() { &input[..cursor_pos] } else { input };
+    let before = if cursor_pos <= input.len() {
+        &input[..cursor_pos]
+    } else {
+        input
+    };
     if let Some(at_pos) = before.rfind('@') {
         let after_at = &before[at_pos + 1..];
         if !after_at.contains(' ') {

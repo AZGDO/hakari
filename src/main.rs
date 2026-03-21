@@ -28,7 +28,8 @@ async fn main() -> anyhow::Result<()> {
             .init();
     }
 
-    let project_dir = args.project_dir
+    let project_dir = args
+        .project_dir
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     let config = HakariConfig::load(args.config.as_ref())?;

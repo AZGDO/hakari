@@ -1,4 +1,4 @@
 pub mod client;
-pub mod providers;
 pub mod messages;
+pub mod providers;
 pub mod tool_schema;

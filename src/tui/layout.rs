@@ -1,5 +1,6 @@
 use ratatui::prelude::*;
 
+#[derive(Debug, Clone, Copy)]
 pub struct AppLayout {
     pub header: Rect,
     pub messages: Rect,
@@ -14,10 +15,10 @@ impl AppLayout {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),          // header (2-line)
-                Constraint::Min(4),             // messages
+                Constraint::Length(2),             // header (2-line)
+                Constraint::Min(4),                // messages
                 Constraint::Length(clamped_input), // input
-                Constraint::Length(1),          // status
+                Constraint::Length(1),             // status
             ])
             .split(area);
 

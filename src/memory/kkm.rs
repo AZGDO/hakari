@@ -50,7 +50,10 @@ impl Default for Kkm {
                 os_version: String::new(),
                 arch: std::env::consts::ARCH.to_string(),
                 shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
-                home_dir: dirs::home_dir().unwrap_or_default().to_string_lossy().to_string(),
+                home_dir: dirs::home_dir()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
                 username: std::env::var("USER").unwrap_or_else(|_| "unknown".to_string()),
             },
             tools: HashMap::new(),
@@ -122,13 +125,22 @@ impl Kkm {
                         .arg("--version")
                         .output()
                         .ok()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").to_string())
+                        .map(|o| {
+                            String::from_utf8_lossy(&o.stdout)
+                                .lines()
+                                .next()
+                                .unwrap_or("")
+                                .to_string()
+                        })
                         .unwrap_or_default();
-                    self.tools.insert(name.to_string(), ToolInfo {
-                        path,
-                        version,
-                        notes: String::new(),
-                    });
+                    self.tools.insert(
+                        name.to_string(),
+                        ToolInfo {
+                            path,
+                            version,
+                            notes: String::new(),
+                        },
+                    );
                 }
             }
         }

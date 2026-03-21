@@ -3,11 +3,7 @@ use crate::memory::kpms::Kpms;
 use crate::shizuka::preparation::PreparationResult;
 use std::path::Path;
 
-pub fn build_nano_context(
-    prep: &PreparationResult,
-    project_dir: &Path,
-    kpms: &Kpms,
-) -> String {
+pub fn build_nano_context(prep: &PreparationResult, project_dir: &Path, kpms: &Kpms) -> String {
     let mut context = String::new();
 
     // Task description
@@ -23,7 +19,10 @@ pub fn build_nano_context(
             context.push_str(&format!("- Framework: {}\n", kpms.project.framework));
         }
         if !kpms.project.package_manager.is_empty() {
-            context.push_str(&format!("- Package manager: {}\n", kpms.project.package_manager));
+            context.push_str(&format!(
+                "- Package manager: {}\n",
+                kpms.project.package_manager
+            ));
         }
         for pattern in &kpms.architecture.patterns {
             context.push_str(&format!("- {}\n", pattern));
@@ -79,7 +78,10 @@ pub fn build_nano_context(
                 context.push_str("\n\n");
             }
             Err(e) => {
-                context.push_str(&format!("Reference: {} (could not read: {})\n\n", file_path, e));
+                context.push_str(&format!(
+                    "Reference: {} (could not read: {})\n\n",
+                    file_path, e
+                ));
             }
         }
     }

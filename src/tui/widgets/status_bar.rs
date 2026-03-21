@@ -1,7 +1,7 @@
+use crate::memory::kms::TaskClassification;
+use crate::tui::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
-use crate::tui::theme::Theme;
-use crate::memory::kms::TaskClassification;
 
 pub struct StatusBarData {
     pub classification: Option<TaskClassification>,
@@ -9,6 +9,9 @@ pub struct StatusBarData {
     pub max_steps: usize,
     pub context_tokens: usize,
     pub status: AgentStatus,
+    pub modified_files: usize,
+    pub pinned_files: usize,
+    pub activity: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +78,13 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, data: &StatusBarData) {
         ));
     }
 
+    if let Some(activity) = &data.activity {
+        spans.push(Span::styled(
+            format!("  {}", activity),
+            Style::default().fg(Theme::mauve()).bg(bg),
+        ));
+    }
+
     // Right side: context tokens + hints
     let mut right = Vec::new();
 
@@ -86,6 +96,14 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, data: &StatusBarData) {
     right.push(Span::styled(
         format!("{} ", ctx_str),
         Style::default().fg(Theme::text_muted()).bg(bg),
+    ));
+    right.push(Span::styled(
+        format!("{} modified  ", data.modified_files),
+        Style::default().fg(Theme::peach()).bg(bg),
+    ));
+    right.push(Span::styled(
+        format!("{} pinned  ", data.pinned_files),
+        Style::default().fg(Theme::blue()).bg(bg),
     ));
     right.push(Span::styled(
         " /help ",

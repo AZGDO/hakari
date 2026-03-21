@@ -1,7 +1,7 @@
+use crate::tui::commands;
+use crate::tui::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use crate::tui::theme::Theme;
-use crate::tui::commands;
 use std::path::Path;
 
 pub struct InputBar {
@@ -123,7 +123,11 @@ impl InputBar {
             .rfind(|c: char| c.is_whitespace() || c == '/' || c == '.')
             .map(|p| p + 1)
             .unwrap_or(0);
-        self.content = format!("{}{}", &self.content[..new_pos], &self.content[self.cursor_pos..]);
+        self.content = format!(
+            "{}{}",
+            &self.content[..new_pos],
+            &self.content[self.cursor_pos..]
+        );
         self.cursor_pos = new_pos;
         self.update_suggestions_state();
     }
@@ -153,7 +157,12 @@ impl InputBar {
             let file = self.file_suggestions[self.file_selected].clone();
             // Replace the @query with the file
             if let Some(at_pos) = self.content[..self.cursor_pos].rfind('@') {
-                self.content = format!("{}@{} {}", &self.content[..at_pos], file, &self.content[self.cursor_pos..]);
+                self.content = format!(
+                    "{}@{} {}",
+                    &self.content[..at_pos],
+                    file,
+                    &self.content[self.cursor_pos..]
+                );
                 self.cursor_pos = at_pos + 1 + file.len() + 1;
             }
             self.clear_suggestions();
@@ -173,15 +182,18 @@ impl InputBar {
 
     pub fn suggestion_down(&mut self) {
         if !self.slash_suggestions.is_empty() {
-            self.slash_selected = (self.slash_selected + 1).min(self.slash_suggestions.len().saturating_sub(1));
+            self.slash_selected =
+                (self.slash_selected + 1).min(self.slash_suggestions.len().saturating_sub(1));
         }
         if !self.file_suggestions.is_empty() {
-            self.file_selected = (self.file_selected + 1).min(self.file_suggestions.len().saturating_sub(1));
+            self.file_selected =
+                (self.file_selected + 1).min(self.file_suggestions.len().saturating_sub(1));
         }
     }
 
     pub fn has_suggestions(&self) -> bool {
-        self.show_suggestions && (!self.slash_suggestions.is_empty() || !self.file_suggestions.is_empty())
+        self.show_suggestions
+            && (!self.slash_suggestions.is_empty() || !self.file_suggestions.is_empty())
     }
 
     fn update_suggestions_state(&mut self) {
@@ -278,6 +290,63 @@ impl InputBar {
         (self.line_count() as u16 + 2).min(10)
     }
 
+    pub fn suggestion_popup_area(&self, input_area: Rect) -> Option<Rect> {
+        if !self.has_suggestions() {
+            return None;
+        }
+
+        let item_count = if !self.slash_suggestions.is_empty() {
+            self.slash_suggestions.len()
+        } else {
+            self.file_suggestions.len()
+        };
+
+        let height = (item_count as u16 + 2).min(12);
+        Some(Rect {
+            x: input_area.x + 1,
+            y: input_area.y.saturating_sub(height),
+            width: input_area.width.saturating_sub(2).min(60),
+            height,
+        })
+    }
+
+    pub fn select_suggestion_at(&mut self, input_area: Rect, x: u16, y: u16) -> bool {
+        let Some(popup_area) = self.suggestion_popup_area(input_area) else {
+            return false;
+        };
+
+        if x < popup_area.x
+            || x >= popup_area.x + popup_area.width
+            || y < popup_area.y
+            || y >= popup_area.y + popup_area.height
+        {
+            return false;
+        }
+
+        let row = y.saturating_sub(popup_area.y + 1) as usize;
+        if !self.slash_suggestions.is_empty() {
+            if row < self.slash_suggestions.len() {
+                self.slash_selected = row;
+                return self.accept_suggestion();
+            }
+        } else if row < self.file_suggestions.len() {
+            self.file_selected = row;
+            return self.accept_suggestion();
+        }
+
+        false
+    }
+
+    pub fn set_cursor_from_position(&mut self, inner_area: Rect, x: u16, y: u16) {
+        if inner_area.width == 0 || inner_area.height == 0 {
+            return;
+        }
+
+        let rel_x = x.saturating_sub(inner_area.x) as usize;
+        let rel_y = y.saturating_sub(inner_area.y) as usize;
+        self.cursor_pos = self.cursor_pos_from_xy(rel_x, rel_y, inner_area.width as usize);
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let border_style = if self.focused {
             Theme::input_border()
@@ -297,7 +366,9 @@ impl InputBar {
                 let short = file.rsplit('/').next().unwrap_or(file);
                 spans.push(Span::styled(
                     format!(" @{} ", short),
-                    Style::default().fg(Theme::blue()).bg(Theme::surface_bright()),
+                    Style::default()
+                        .fg(Theme::blue())
+                        .bg(Theme::surface_bright()),
                 ));
             }
             spans.push(Span::styled(" ", Theme::input_text()));
@@ -315,8 +386,7 @@ impl InputBar {
         // Styled content: highlight @mentions and /commands
         let styled_content = self.build_styled_content();
 
-        let paragraph = Paragraph::new(styled_content)
-            .wrap(Wrap { trim: false });
+        let paragraph = Paragraph::new(styled_content).wrap(Wrap { trim: false });
 
         frame.render_widget(block, area);
         frame.render_widget(paragraph, inner);
@@ -327,7 +397,10 @@ impl InputBar {
             let cursor_x = inner.x + cx as u16;
             let cursor_y = inner.y + cy as u16;
             if cursor_y < inner.y + inner.height {
-                frame.set_cursor_position(Position { x: cursor_x, y: cursor_y });
+                frame.set_cursor_position(Position {
+                    x: cursor_x,
+                    y: cursor_y,
+                });
             }
         }
 
@@ -338,70 +411,96 @@ impl InputBar {
     }
 
     fn build_styled_content(&self) -> Vec<Line<'static>> {
-        let mut spans = Vec::new();
-        let content = &self.content;
-        let mut i = 0;
-        let chars: Vec<char> = content.chars().collect();
+        let mut lines = Vec::new();
 
-        while i < chars.len() {
-            if chars[i] == '/' && i == 0 {
-                // Slash command - color the command part
-                let start = i;
-                let mut end = i;
-                while end < chars.len() && !chars[end].is_whitespace() {
-                    end += 1;
+        for (line_index, line) in self.content.split('\n').enumerate() {
+            let mut spans = Vec::new();
+            let mut i = 0;
+            let chars: Vec<char> = line.chars().collect();
+
+            while i < chars.len() {
+                if chars[i] == '/' && i == 0 && line_index == 0 {
+                    let start = i;
+                    let mut end = i;
+                    while end < chars.len() && !chars[end].is_whitespace() {
+                        end += 1;
+                    }
+                    let cmd_text: String = chars[start..end].iter().collect();
+                    spans.push(Span::styled(
+                        cmd_text,
+                        Style::default()
+                            .fg(Theme::mauve())
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    i = end;
+                } else if chars[i] == '@' {
+                    let start = i;
+                    let mut end = i + 1;
+                    while end < chars.len() && !chars[end].is_whitespace() {
+                        end += 1;
+                    }
+                    let mention: String = chars[start..end].iter().collect();
+                    spans.push(Span::styled(
+                        mention,
+                        Style::default()
+                            .fg(Theme::blue())
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    i = end;
+                } else {
+                    let start = i;
+                    while i < chars.len()
+                        && chars[i] != '@'
+                        && !(chars[i] == '/' && i == 0 && line_index == 0)
+                    {
+                        i += 1;
+                    }
+                    let text: String = chars[start..i].iter().collect();
+                    spans.push(Span::styled(text, Theme::input_text()));
                 }
-                let cmd_text: String = chars[start..end].iter().collect();
-                spans.push(Span::styled(cmd_text, Style::default().fg(Theme::mauve()).add_modifier(Modifier::BOLD)));
-                i = end;
-            } else if chars[i] == '@' {
-                let start = i;
-                let mut end = i + 1;
-                while end < chars.len() && !chars[end].is_whitespace() {
-                    end += 1;
-                }
-                let mention: String = chars[start..end].iter().collect();
-                spans.push(Span::styled(mention, Style::default().fg(Theme::blue()).add_modifier(Modifier::BOLD)));
-                i = end;
-            } else {
-                let start = i;
-                while i < chars.len() && chars[i] != '@' && !(chars[i] == '/' && i == 0) {
-                    i += 1;
-                }
-                let text: String = chars[start..i].iter().collect();
-                spans.push(Span::styled(text, Theme::input_text()));
             }
+
+            if spans.is_empty() {
+                spans.push(Span::styled("", Theme::input_text()));
+            }
+
+            lines.push(Line::from(spans));
         }
 
-        if spans.is_empty() {
-            spans.push(Span::styled("", Theme::input_text()));
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled("", Theme::input_text())));
         }
 
-        vec![Line::from(spans)]
+        lines
     }
 
     fn render_suggestions(&self, frame: &mut Frame, input_area: Rect) {
         let items: Vec<(String, String, bool)> = if !self.slash_suggestions.is_empty() {
-            self.slash_suggestions.iter().enumerate().map(|(i, cmd)| {
-                (cmd.name.to_string(), cmd.description.to_string(), i == self.slash_selected)
-            }).collect()
+            self.slash_suggestions
+                .iter()
+                .enumerate()
+                .map(|(i, cmd)| {
+                    (
+                        cmd.name.to_string(),
+                        cmd.description.to_string(),
+                        i == self.slash_selected,
+                    )
+                })
+                .collect()
         } else if !self.file_suggestions.is_empty() {
-            self.file_suggestions.iter().enumerate().map(|(i, f)| {
-                let short = f.rsplit('/').next().unwrap_or(f);
-                (format!("@{}", short), f.clone(), i == self.file_selected)
-            }).collect()
+            self.file_suggestions
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let short = f.rsplit('/').next().unwrap_or(f);
+                    (format!("@{}", short), f.clone(), i == self.file_selected)
+                })
+                .collect()
         } else {
             return;
         };
 
-        let height = (items.len() as u16 + 2).min(12);
-        let popup_y = input_area.y.saturating_sub(height);
-        let popup_area = Rect {
-            x: input_area.x + 1,
-            y: popup_y,
-            width: input_area.width.saturating_sub(2).min(60),
-            height,
-        };
+        let popup_area = self.suggestion_popup_area(input_area).unwrap_or(input_area);
 
         frame.render_widget(Clear, popup_area);
 
@@ -417,12 +516,17 @@ impl InputBar {
         let mut lines = Vec::new();
         for (name, desc, selected) in &items {
             let style = if *selected {
-                Style::default().fg(Theme::text_bright()).bg(Theme::surface_bright())
+                Style::default()
+                    .fg(Theme::text_bright())
+                    .bg(Theme::surface_bright())
             } else {
                 Style::default().fg(Theme::text())
             };
             let name_style = if *selected {
-                Style::default().fg(Theme::mauve()).bg(Theme::surface_bright()).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Theme::mauve())
+                    .bg(Theme::surface_bright())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Theme::mauve())
             };
@@ -431,7 +535,14 @@ impl InputBar {
             lines.push(Line::from(vec![
                 Span::styled(format!(" {}", name), name_style),
                 Span::styled(" ".repeat(padding), style),
-                Span::styled(desc.clone(), Style::default().fg(Theme::text_dim()).bg(if *selected { Theme::surface_bright() } else { Theme::surface() })),
+                Span::styled(
+                    desc.clone(),
+                    Style::default().fg(Theme::text_dim()).bg(if *selected {
+                        Theme::surface_bright()
+                    } else {
+                        Theme::surface()
+                    }),
+                ),
             ]));
         }
 
@@ -456,5 +567,38 @@ impl InputBar {
             }
         }
         (x, y)
+    }
+
+    fn cursor_pos_from_xy(&self, target_x: usize, target_y: usize, width: usize) -> usize {
+        let mut x = 0;
+        let mut y = 0;
+        let mut pos = 0;
+
+        for ch in self.content.chars() {
+            if y == target_y && x >= target_x {
+                return pos;
+            }
+
+            pos += ch.len_utf8();
+            if ch == '\n' {
+                if y == target_y {
+                    return pos.saturating_sub(1);
+                }
+                x = 0;
+                y += 1;
+                continue;
+            }
+
+            x += 1;
+            if width > 0 && x >= width {
+                if y == target_y {
+                    return pos;
+                }
+                x = 0;
+                y += 1;
+            }
+        }
+
+        self.content.len()
     }
 }

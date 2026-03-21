@@ -1,16 +1,16 @@
+use crate::tui::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use crate::tui::theme::Theme;
 
-pub fn render_tool_result(
-    name: &str,
-    content: &str,
-    success: bool,
-) -> Vec<Line<'static>> {
+pub fn render_tool_result(name: &str, content: &str, success: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let icon = if success { "✓" } else { "✗" };
     let header_style = Theme::tool_header();
-    let content_style = if success { Theme::tool_success() } else { Theme::tool_error() };
+    let content_style = if success {
+        Theme::tool_success()
+    } else {
+        Theme::tool_error()
+    };
 
     // Top border
     let header_text = format!("─ {} {} ", icon, name);

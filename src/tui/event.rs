@@ -31,8 +31,7 @@ pub fn poll_event(timeout: Duration) -> anyhow::Result<Option<AppEvent>> {
 pub fn is_quit(key: &KeyEvent) -> bool {
     matches!(
         (key.code, key.modifiers),
-        (KeyCode::Char('c'), KeyModifiers::CONTROL)
-            | (KeyCode::Char('q'), KeyModifiers::CONTROL)
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), KeyModifiers::CONTROL)
     )
 }
 

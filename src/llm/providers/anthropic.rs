@@ -98,7 +98,8 @@ impl AnthropicProvider {
             body["tools"] = json!(tools);
         }
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/v1/messages", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
@@ -145,8 +146,10 @@ impl AnthropicProvider {
                                 "content_block_start" => {
                                     if let Some(block) = parsed.get("content_block") {
                                         if block["type"].as_str() == Some("tool_use") {
-                                            current_tool_id = block["id"].as_str().unwrap_or("").to_string();
-                                            current_tool_name = block["name"].as_str().unwrap_or("").to_string();
+                                            current_tool_id =
+                                                block["id"].as_str().unwrap_or("").to_string();
+                                            current_tool_name =
+                                                block["name"].as_str().unwrap_or("").to_string();
                                             in_tool = true;
                                             let _ = tx.send(StreamEvent::ToolCallStart {
                                                 id: current_tool_id.clone(),
@@ -159,18 +162,22 @@ impl AnthropicProvider {
                                     if let Some(delta) = parsed.get("delta") {
                                         if let Some(text) = delta["text"].as_str() {
                                             text_content.push_str(text);
-                                            let _ = tx.send(StreamEvent::TextDelta(text.to_string()));
+                                            let _ =
+                                                tx.send(StreamEvent::TextDelta(text.to_string()));
                                         }
                                         if let Some(partial_json) = delta["partial_json"].as_str() {
                                             current_tool_args.push_str(partial_json);
-                                            let _ = tx.send(StreamEvent::ToolCallArgumentsDelta(partial_json.to_string()));
+                                            let _ = tx.send(StreamEvent::ToolCallArgumentsDelta(
+                                                partial_json.to_string(),
+                                            ));
                                         }
                                     }
                                 }
                                 "content_block_stop" => {
                                     if in_tool {
-                                        let arguments: Value = serde_json::from_str(&current_tool_args)
-                                            .unwrap_or(json!({}));
+                                        let arguments: Value =
+                                            serde_json::from_str(&current_tool_args)
+                                                .unwrap_or(json!({}));
                                         tool_calls.push(ToolCall {
                                             id: current_tool_id.clone(),
                                             name: current_tool_name.clone(),

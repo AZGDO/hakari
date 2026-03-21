@@ -1,3 +1,5 @@
+use super::context_builder;
+use super::system_prompt;
 use crate::config::HakariConfig;
 use crate::llm::client::LlmClient;
 use crate::llm::messages::{ConversationHistory, Message, ToolCall};
@@ -9,21 +11,36 @@ use crate::memory::kpms::Kpms;
 use crate::shizuka::escalation::{EscalationAction, EscalationEngine};
 use crate::shizuka::interceptor::Interceptor;
 use crate::shizuka::preparation::PreparationResult;
-use super::context_builder;
-use super::system_prompt;
+use crate::tools::ToolResultMetadata;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
+    PreparationStart,
+    PreparationResult(String),
     ThinkingStart,
     TextDelta(String),
-    ToolCallStart { name: String, id: String },
-    ToolCallEnd { name: String, result: String, success: bool },
+    Trace(String),
+    ToolCallStart {
+        name: String,
+        id: String,
+    },
+    ToolCallEnd {
+        name: String,
+        result: String,
+        success: bool,
+        metadata: ToolResultMetadata,
+        step: usize,
+        context_tokens: usize,
+    },
     Warning(String),
     Escalation(String),
-    Complete(String),
+    Complete {
+        final_response: String,
+        kms: Box<Kms>,
+    },
     Error(String),
 }
 
@@ -57,11 +74,12 @@ impl NanoAgent {
         kkm: &Kkm,
         event_tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> anyhow::Result<String> {
-        let system_prompt = if prep.task_classification == crate::memory::kms::TaskClassification::Large {
-            system_prompt::build_orchestrator_system_prompt()
-        } else {
-            system_prompt::build_system_prompt()
-        };
+        let system_prompt =
+            if prep.task_classification == crate::memory::kms::TaskClassification::Large {
+                system_prompt::build_orchestrator_system_prompt()
+            } else {
+                system_prompt::build_system_prompt()
+            };
 
         let initial_context = context_builder::build_nano_context(prep, &self.project_dir, kpms);
 
@@ -75,7 +93,9 @@ impl NanoAgent {
             tool_schema::get_tool_definitions_openai()
         };
 
-        let scope_files: Vec<String> = prep.files_to_preload.iter()
+        let scope_files: Vec<String> = prep
+            .files_to_preload
+            .iter()
             .chain(prep.files_to_reference.iter())
             .cloned()
             .collect();
@@ -115,7 +135,9 @@ impl NanoAgent {
             }
 
             // Apply context evictions before sending
-            interceptor.context_controller.apply_evictions(&mut history, kms);
+            interceptor
+                .context_controller
+                .apply_evictions(&mut history, kms);
 
             // Stream from LLM
             let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
@@ -125,7 +147,8 @@ impl NanoAgent {
             let llm = self.llm_client.clone();
 
             let llm_task = tokio::spawn(async move {
-                llm.nano_chat(&messages_clone, &tools_clone, Some(stream_tx)).await
+                llm.nano_chat(&messages_clone, &tools_clone, Some(stream_tx))
+                    .await
             });
 
             // Forward stream events
@@ -140,13 +163,25 @@ impl NanoAgent {
                             name: name.clone(),
                             id: id.clone(),
                         });
+                        let _ = event_tx_clone.send(AgentEvent::Trace(format!(
+                            "ToolCallStart: {} ({})",
+                            name, id
+                        )));
+                    }
+                    StreamEvent::ToolCallArgumentsDelta(args) => {
+                        let _ = event_tx_clone.send(AgentEvent::Trace(format!(
+                            "ToolCallArgumentsDelta: {}",
+                            args
+                        )));
+                    }
+                    StreamEvent::ToolCallEnd => {
+                        let _ = event_tx_clone.send(AgentEvent::Trace("ToolCallEnd".to_string()));
                     }
                     StreamEvent::Done => break,
                     StreamEvent::Error(e) => {
                         let _ = event_tx_clone.send(AgentEvent::Error(e.clone()));
                         break;
                     }
-                    _ => {}
                 }
             }
 
@@ -156,22 +191,23 @@ impl NanoAgent {
                 // No tool calls = task complete
                 final_response = text.clone();
                 history.add(Message::assistant(&text));
-                let _ = event_tx.send(AgentEvent::Complete(text));
+                let _ = event_tx.send(AgentEvent::Complete {
+                    final_response: text,
+                    kms: Box::new(kms.clone()),
+                });
                 break;
             }
 
             // Add assistant message with tool calls
-            history.add(Message::assistant_with_tool_calls(&text, tool_calls.clone()));
+            history.add(Message::assistant_with_tool_calls(
+                &text,
+                tool_calls.clone(),
+            ));
 
             // Execute each tool call through interceptor
             for tc in &tool_calls {
-                let intercept_result = interceptor.intercept_tool_call(
-                    tc,
-                    &self.project_dir,
-                    kms,
-                    kpms,
-                    kkm,
-                );
+                let intercept_result =
+                    interceptor.intercept_tool_call(tc, &self.project_dir, kms, kpms, kkm);
 
                 // Send warnings
                 for warning in &intercept_result.injected_warnings {
@@ -182,12 +218,18 @@ impl NanoAgent {
                     name: tc.name.clone(),
                     result: intercept_result.tool_result.output.clone(),
                     success: intercept_result.tool_result.success,
+                    metadata: intercept_result.tool_result.metadata.clone(),
+                    step: kms.steps.current,
+                    context_tokens: kms.context.total_tokens_estimate,
                 });
 
                 // Handle confirmation needed
                 if intercept_result.needs_confirmation {
                     let confirm_msg = intercept_result.confirmation_message.unwrap_or_default();
-                    let _ = event_tx.send(AgentEvent::Warning(format!("Confirmation needed: {}", confirm_msg)));
+                    let _ = event_tx.send(AgentEvent::Warning(format!(
+                        "Confirmation needed: {}",
+                        confirm_msg
+                    )));
                     history.add(Message::tool_result(
                         &tc.id,
                         &format!("Action requires user confirmation: {}", confirm_msg),

@@ -1,5 +1,5 @@
-use crate::memory::kms::Kms;
 use crate::llm::messages::ConversationHistory;
+use crate::memory::kms::Kms;
 
 pub struct ContextController {
     max_tokens: usize,
@@ -7,7 +7,7 @@ pub struct ContextController {
 }
 
 struct TtlConfig {
-    active_file: Option<usize>,    // None = infinity
+    active_file: Option<usize>, // None = infinity
     preloaded_file: usize,
     reference_file: usize,
     nano_read: usize,
@@ -86,11 +86,7 @@ impl ContextController {
         }
     }
 
-    pub fn apply_evictions(
-        &self,
-        history: &mut ConversationHistory,
-        kms: &Kms,
-    ) {
+    pub fn apply_evictions(&self, history: &mut ConversationHistory, kms: &Kms) {
         for path in &kms.context.compacted_files {
             if let Some(info) = kms.files.index.get(path) {
                 if let Some(ref summary) = info.compact_summary {

@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "hakari", about = "HAKARI — Harness for Agents, Keeping Agents Reasonably Iterate")]
+#[command(
+    name = "hakari",
+    about = "HAKARI — Harness for Agents, Keeping Agents Reasonably Iterate"
+)]
 pub struct CliArgs {
     /// Project directory (defaults to current directory)
     #[arg(short, long)]
@@ -63,7 +66,12 @@ impl std::fmt::Display for ReasoningLevel {
 impl ReasoningLevel {
     pub fn default_for_model(model_id: &str) -> Self {
         let lower = model_id.to_lowercase();
-        if lower.contains("gpt") || lower.contains("codex") || lower.contains("o1") || lower.contains("o3") || lower.contains("o4") {
+        if lower.contains("gpt")
+            || lower.contains("codex")
+            || lower.contains("o1")
+            || lower.contains("o3")
+            || lower.contains("o4")
+        {
             Self::XHigh
         } else {
             Self::High
@@ -95,6 +103,8 @@ pub struct HakariConfig {
     pub max_context_tokens: usize,
     pub iteration_budgets: IterationBudgets,
     pub model_list: Vec<ModelListEntry>,
+    #[serde(skip)]
+    pub config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -156,37 +166,100 @@ impl Default for HakariConfig {
             max_context_tokens: 128_000,
             iteration_budgets: IterationBudgets::default(),
             model_list: Vec::new(),
+            config_path: None,
         }
     }
 }
 
 impl HakariConfig {
+    pub fn default_path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("hakari")
+            .join("config.json")
+    }
+
     pub fn load(path: Option<&PathBuf>) -> anyhow::Result<Self> {
-        if let Some(path) = path {
-            let content = std::fs::read_to_string(path)?;
-            Ok(serde_json::from_str(&content)?)
-        } else {
-            let config_path = dirs::config_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("hakari")
-                .join("config.json");
-            if config_path.exists() {
-                let content = std::fs::read_to_string(&config_path)?;
-                Ok(serde_json::from_str(&content)?)
-            } else {
-                Ok(Self::default())
+        let resolved_path = path.cloned().unwrap_or_else(Self::default_path);
+
+        if resolved_path.exists() {
+            let content = std::fs::read_to_string(&resolved_path)?;
+            let mut config: Self = serde_json::from_str(&content)?;
+            config.config_path = Some(resolved_path);
+            if config.openai_api_key.is_none() {
+                config.openai_api_key = std::env::var("OPENAI_API_KEY").ok();
             }
+            if config.anthropic_api_key.is_none() {
+                config.anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+            }
+            Ok(config)
+        } else {
+            Ok(Self {
+                config_path: Some(resolved_path),
+                ..Self::default()
+            })
         }
+    }
+
+    pub fn save(&self) -> anyhow::Result<()> {
+        let path = self.config_path.clone().unwrap_or_else(Self::default_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let existing_secret_keys = if path.exists() {
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .unwrap_or_else(|| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+
+        let mut persisted = self.clone();
+        persisted.config_path = Some(path.clone());
+        persisted.openai_api_key = existing_secret_keys
+            .get("openai_api_key")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        persisted.anthropic_api_key = existing_secret_keys
+            .get("anthropic_api_key")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+
+        let content = serde_json::to_string_pretty(&persisted)?;
+        std::fs::write(path, content)?;
+        Ok(())
     }
 
     pub fn nano_budget(&self, classification: &str) -> (usize, usize, usize) {
         let b = &self.iteration_budgets;
         match classification {
-            "trivial" => (b.trivial_max_tool_calls, b.trivial_max_writes_per_file, b.trivial_max_execute_retries),
-            "small" => (b.small_max_tool_calls, b.small_max_writes_per_file, b.small_max_execute_retries),
-            "medium" => (b.medium_max_tool_calls, b.medium_max_writes_per_file, b.medium_max_execute_retries),
-            "large" => (b.large_max_tool_calls, b.large_max_writes_per_file, b.large_max_execute_retries),
-            _ => (b.medium_max_tool_calls, b.medium_max_writes_per_file, b.medium_max_execute_retries),
+            "trivial" => (
+                b.trivial_max_tool_calls,
+                b.trivial_max_writes_per_file,
+                b.trivial_max_execute_retries,
+            ),
+            "small" => (
+                b.small_max_tool_calls,
+                b.small_max_writes_per_file,
+                b.small_max_execute_retries,
+            ),
+            "medium" => (
+                b.medium_max_tool_calls,
+                b.medium_max_writes_per_file,
+                b.medium_max_execute_retries,
+            ),
+            "large" => (
+                b.large_max_tool_calls,
+                b.large_max_writes_per_file,
+                b.large_max_execute_retries,
+            ),
+            _ => (
+                b.medium_max_tool_calls,
+                b.medium_max_writes_per_file,
+                b.medium_max_execute_retries,
+            ),
         }
     }
 }

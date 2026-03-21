@@ -60,10 +60,7 @@ pub fn release_file_locks(kms: &mut Kms, files: &[String]) {
     }
 }
 
-pub fn check_file_overlap(
-    request_files: &[String],
-    parent_active_files: &[String],
-) -> Vec<String> {
+pub fn check_file_overlap(request_files: &[String], parent_active_files: &[String]) -> Vec<String> {
     let parent_set: HashSet<&str> = parent_active_files.iter().map(|s| s.as_str()).collect();
     request_files
         .iter()

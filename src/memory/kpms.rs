@@ -140,25 +140,34 @@ impl Kpms {
     }
 
     pub fn update_file_index(&mut self, path: &str, description: &str) {
-        self.file_index.insert(path.to_string(), description.to_string());
+        self.file_index
+            .insert(path.to_string(), description.to_string());
     }
 
     pub fn get_relevant_learnings(&self, task_description: &str) -> Vec<&Learning> {
         let task_lower = task_description.to_lowercase();
-        self.learnings.iter().filter(|l| {
-            let context_lower = l.context.to_lowercase();
-            let lesson_lower = l.lesson.to_lowercase();
-            task_lower.split_whitespace().any(|word| {
-                context_lower.contains(word) || lesson_lower.contains(word)
+        self.learnings
+            .iter()
+            .filter(|l| {
+                let context_lower = l.context.to_lowercase();
+                let lesson_lower = l.lesson.to_lowercase();
+                task_lower
+                    .split_whitespace()
+                    .any(|word| context_lower.contains(word) || lesson_lower.contains(word))
             })
-        }).collect()
+            .collect()
     }
 
     pub fn get_relevant_warnings(&self, task_description: &str) -> Vec<&AntiPattern> {
         let task_lower = task_description.to_lowercase();
-        self.anti_patterns.iter().filter(|ap| {
-            let pattern_lower = ap.pattern.to_lowercase();
-            task_lower.split_whitespace().any(|word| pattern_lower.contains(word))
-        }).collect()
+        self.anti_patterns
+            .iter()
+            .filter(|ap| {
+                let pattern_lower = ap.pattern.to_lowercase();
+                task_lower
+                    .split_whitespace()
+                    .any(|word| pattern_lower.contains(word))
+            })
+            .collect()
     }
 }

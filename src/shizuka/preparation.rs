@@ -43,9 +43,16 @@ pub fn try_fast_path(prompt: &str, project_dir: &Path) -> Option<PreparationResu
 
     // Check for trivial task patterns
     let trivial_patterns = [
-        "fix typo", "fix the typo", "rename", "change the name",
-        "update the comment", "add a comment", "remove the comment",
-        "fix whitespace", "fix formatting", "fix indent",
+        "fix typo",
+        "fix the typo",
+        "rename",
+        "change the name",
+        "update the comment",
+        "add a comment",
+        "remove the comment",
+        "fix whitespace",
+        "fix formatting",
+        "fix indent",
     ];
 
     let prompt_lower = prompt.to_lowercase();
@@ -89,12 +96,15 @@ pub async fn run_preparation(
     let mut context = String::new();
     context.push_str(&format!("## User Task\n{}\n\n", prompt));
 
-    context.push_str(&"## Project Info\n".to_string());
+    context.push_str("## Project Info\n");
     context.push_str(&format!("Name: {}\n", kpms.project.name));
     context.push_str(&format!("Type: {}\n", kpms.project.project_type));
     context.push_str(&format!("Language: {}\n", kpms.project.language));
     context.push_str(&format!("Framework: {}\n", kpms.project.framework));
-    context.push_str(&format!("Package Manager: {}\n\n", kpms.project.package_manager));
+    context.push_str(&format!(
+        "Package Manager: {}\n\n",
+        kpms.project.package_manager
+    ));
 
     context.push_str(&format!("## File Tree\n{}\n\n", file_tree_str));
 
@@ -122,11 +132,16 @@ pub async fn run_preparation(
         context.push('\n');
     }
 
-    context.push_str(&format!("## Device\nOS: {}, Shell: {}\n\n", kkm.system.os, kkm.system.shell));
+    context.push_str(&format!(
+        "## Device\nOS: {}, Shell: {}\n\n",
+        kkm.system.os, kkm.system.shell
+    ));
 
     if !kms.task.original_prompt.is_empty() {
-        context.push_str(&format!("## Current Session State\nGoal: {}\nStep: {}\n\n",
-            kms.task.goal, kms.steps.current));
+        context.push_str(&format!(
+            "## Current Session State\nGoal: {}\nStep: {}\n\n",
+            kms.task.goal, kms.steps.current
+        ));
     }
 
     let system_prompt = r#"You are Shizuka, the preparation engine for a coding agent called Nano. Your job is to analyze the user's task and prepare the optimal context package.
@@ -152,10 +167,7 @@ Classification guide:
 - medium: 3-5+ files, requires understanding relationships (add error handling to module, refactor pattern)
 - large: system-wide changes, many files, requires decomposition (migration, major refactor)"#;
 
-    let messages = vec![
-        Message::system(system_prompt),
-        Message::user(&context),
-    ];
+    let messages = vec![Message::system(system_prompt), Message::user(&context)];
 
     let (response_text, _) = llm_client.shizuka_chat(&messages).await?;
 
@@ -170,7 +182,11 @@ Classification guide:
     match serde_json::from_str::<PreparationResult>(cleaned) {
         Ok(result) => Ok(result),
         Err(e) => {
-            tracing::warn!("Failed to parse Shizuka preparation response: {}. Raw: {}", e, cleaned);
+            tracing::warn!(
+                "Failed to parse Shizuka preparation response: {}. Raw: {}",
+                e,
+                cleaned
+            );
             // Fallback: create a basic preparation
             Ok(PreparationResult {
                 task_classification: TaskClassification::Small,

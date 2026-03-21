@@ -1,5 +1,5 @@
-use std::path::Path;
 use crate::memory::kpms::ProjectInfo;
+use std::path::Path;
 
 pub fn detect_project(project_dir: &Path) -> ProjectInfo {
     let name = project_dir

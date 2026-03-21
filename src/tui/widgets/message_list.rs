@@ -1,6 +1,6 @@
-use ratatui::prelude::*;
-use ratatui::widgets::{Paragraph, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use crate::tui::theme::Theme;
+use ratatui::prelude::*;
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 
 #[derive(Debug, Clone)]
 pub enum MessageType {
@@ -8,7 +8,14 @@ pub enum MessageType {
     Nano,
     Shizuka,
     Thinking,
-    ToolResult { name: String, success: bool },
+    ToolResult {
+        name: String,
+        success: bool,
+        file_path: Option<String>,
+        diff: Option<String>,
+        exit_code: Option<i32>,
+        duration_ms: Option<u64>,
+    },
     Warning,
     Error,
     System,
@@ -29,6 +36,9 @@ pub struct MessageList {
     pub auto_scroll: bool,
     pub target_scroll: usize,
     pub smooth_scroll_active: bool,
+    pub animation_frame: u64,
+    pub welcome_animation_start: Option<u64>,
+    pub last_line_map: Vec<Option<usize>>,
 }
 
 impl MessageList {
@@ -39,10 +49,16 @@ impl MessageList {
             auto_scroll: true,
             target_scroll: 0,
             smooth_scroll_active: false,
+            animation_frame: 0,
+            welcome_animation_start: None,
+            last_line_map: Vec::new(),
         }
     }
 
     pub fn add_message(&mut self, msg: ChatMessage) {
+        if matches!(msg.msg_type, MessageType::Welcome) {
+            self.welcome_animation_start = Some(self.animation_frame);
+        }
         self.messages.push(msg);
         if self.auto_scroll {
             self.scroll_to_bottom();
@@ -98,169 +114,384 @@ impl MessageList {
         }
     }
 
+    pub fn message_at(&self, y_in_view: usize) -> Option<usize> {
+        self.last_line_map
+            .get(self.scroll_offset.saturating_add(y_in_view))
+            .copied()
+            .flatten()
+    }
+
+    pub fn tick_animations(&mut self) {
+        self.animation_frame = self.animation_frame.saturating_add(1);
+    }
+
     fn auto_collapse_old_thinking(&mut self) {
         let len = self.messages.len();
-        if len < 3 { return; }
+        if len < 3 {
+            return;
+        }
         for i in 0..len.saturating_sub(2) {
             let msg = &mut self.messages[i];
-            if matches!(msg.msg_type, MessageType::Thinking | MessageType::Shizuka) && !msg.collapsed {
+            if matches!(msg.msg_type, MessageType::Thinking | MessageType::Shizuka)
+                && !msg.collapsed
+            {
                 msg.collapsed = true;
             }
         }
     }
 
-    fn build_lines(&self) -> Vec<Line<'static>> {
+    fn build_lines(&self) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
         let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut line_map: Vec<Option<usize>> = Vec::new();
 
-        for msg in &self.messages {
+        for (message_index, msg) in self.messages.iter().enumerate() {
             match &msg.msg_type {
                 MessageType::Welcome => {
-                    for line in msg.content.lines() {
-                        lines.push(Line::from(Span::styled(
-                            line.to_string(),
-                            Style::default().fg(Theme::text_dim()),
-                        )));
+                    let reveal_lines = self
+                        .welcome_animation_start
+                        .map(|start| {
+                            ((self.animation_frame.saturating_sub(start) as usize) * 2).max(1)
+                        })
+                        .unwrap_or(usize::MAX);
+
+                    for line in msg.content.lines().take(reveal_lines) {
+                        push_line(
+                            &mut lines,
+                            &mut line_map,
+                            message_index,
+                            Line::from(Span::styled(
+                                line.to_string(),
+                                Style::default().fg(Theme::text_dim()),
+                            )),
+                        );
                     }
-                    lines.push(Line::default());
+                    push_blank(&mut lines, &mut line_map, message_index);
                 }
                 MessageType::Thinking => {
                     if msg.collapsed {
-                        let preview = msg.content.lines().next().unwrap_or("").chars().take(50).collect::<String>();
-                        lines.push(Line::from(vec![
-                            Span::styled("  \u{25b8} ", Style::default().fg(Theme::text_muted())),
-                            Span::styled("thinking", Style::default().fg(Theme::text_muted()).add_modifier(Modifier::ITALIC)),
-                            Span::styled(format!("  {}...", preview), Style::default().fg(Theme::text_muted())),
-                        ]));
+                        let preview = msg
+                            .content
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(50)
+                            .collect::<String>();
+                        push_line(
+                            &mut lines,
+                            &mut line_map,
+                            message_index,
+                            Line::from(vec![
+                                Span::styled(
+                                    "  \u{25b8} ",
+                                    Style::default().fg(Theme::text_muted()),
+                                ),
+                                Span::styled(
+                                    "thinking",
+                                    Style::default()
+                                        .fg(Theme::text_muted())
+                                        .add_modifier(Modifier::ITALIC),
+                                ),
+                                Span::styled(
+                                    format!("  {}...", preview),
+                                    Style::default().fg(Theme::text_muted()),
+                                ),
+                            ]),
+                        );
                     } else {
-                        lines.push(Line::from(vec![
-                            Span::styled("  \u{25be} ", Style::default().fg(Theme::text_muted())),
-                            Span::styled("thinking", Style::default().fg(Theme::text_muted()).add_modifier(Modifier::ITALIC)),
-                        ]));
+                        push_line(
+                            &mut lines,
+                            &mut line_map,
+                            message_index,
+                            Line::from(vec![
+                                Span::styled(
+                                    "  \u{25be} ",
+                                    Style::default().fg(Theme::text_muted()),
+                                ),
+                                Span::styled(
+                                    "thinking",
+                                    Style::default()
+                                        .fg(Theme::text_muted())
+                                        .add_modifier(Modifier::ITALIC),
+                                ),
+                            ]),
+                        );
                         for line in msg.content.lines() {
-                            lines.push(Line::from(vec![
-                                Span::styled("    ", Style::default()),
-                                Span::styled(line.to_string(), Style::default().fg(Theme::text_muted()).add_modifier(Modifier::ITALIC)),
-                            ]));
+                            push_line(
+                                &mut lines,
+                                &mut line_map,
+                                message_index,
+                                Line::from(vec![
+                                    Span::styled("    ", Style::default()),
+                                    Span::styled(
+                                        line.to_string(),
+                                        Style::default()
+                                            .fg(Theme::text_muted())
+                                            .add_modifier(Modifier::ITALIC),
+                                    ),
+                                ]),
+                            );
                         }
                     }
-                    lines.push(Line::default());
+                    push_blank(&mut lines, &mut line_map, message_index);
                 }
                 MessageType::Shizuka => {
                     if msg.collapsed {
-                        let preview = msg.content.lines().next().unwrap_or("").chars().take(50).collect::<String>();
-                        lines.push(Line::from(vec![
-                            Span::styled("  \u{25b8} ", Style::default().fg(Theme::cyan())),
-                            Span::styled("shizuka", Style::default().fg(Theme::cyan()).add_modifier(Modifier::DIM)),
-                            Span::styled(format!("  {}", preview), Style::default().fg(Theme::text_muted())),
-                        ]));
-                    } else {
-                        lines.push(Line::from(vec![
-                            Span::styled("  \u{25be} ", Style::default().fg(Theme::cyan())),
-                            Span::styled("shizuka ", Theme::shizuka_message()),
-                        ]));
-                        for line in msg.content.lines() {
-                            lines.push(Line::from(vec![
-                                Span::styled("    ", Style::default()),
-                                Span::styled(line.to_string(), Theme::shizuka_message()),
-                            ]));
-                        }
-                    }
-                    lines.push(Line::default());
-                }
-                MessageType::ToolResult { name, success } => {
-                    let icon = if *success { "\u{2713}" } else { "\u{2717}" };
-                    let icon_color = if *success { Theme::green() } else { Theme::red() };
-
-                    if msg.collapsed {
-                        lines.push(Line::from(vec![
-                            Span::styled("  \u{25b8} ", Style::default().fg(Theme::text_muted())),
-                            Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
-                            Span::styled(format!("{} ", name), Style::default().fg(Theme::text_dim())),
-                            Span::styled(
-                                msg.content.lines().next().unwrap_or("").chars().take(60).collect::<String>(),
-                                Style::default().fg(Theme::text_muted()),
-                            ),
-                        ]));
-                    } else {
-                        lines.push(Line::from(vec![
-                            Span::styled("  ", Style::default()),
-                            Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
-                            Span::styled(
-                                format!("{}", name),
-                                Style::default().fg(Theme::text_dim()),
-                            ),
-                        ]));
-                        for content_line in msg.content.lines().take(20) {
-                            lines.push(Line::from(vec![
-                                Span::styled("    ", Style::default()),
+                        let preview = msg
+                            .content
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(50)
+                            .collect::<String>();
+                        push_line(
+                            &mut lines,
+                            &mut line_map,
+                            message_index,
+                            Line::from(vec![
+                                Span::styled("  \u{25b8} ", Style::default().fg(Theme::cyan())),
                                 Span::styled(
-                                    content_line.to_string(),
+                                    "shizuka",
+                                    Style::default()
+                                        .fg(Theme::cyan())
+                                        .add_modifier(Modifier::DIM),
+                                ),
+                                Span::styled(
+                                    format!("  {}", preview),
                                     Style::default().fg(Theme::text_muted()),
                                 ),
-                            ]));
-                        }
-                        let total = msg.content.lines().count();
-                        if total > 20 {
-                            lines.push(Line::from(Span::styled(
-                                format!("    ... {} more lines", total - 20),
-                                Style::default().fg(Theme::text_muted()),
-                            )));
+                            ]),
+                        );
+                    } else {
+                        push_line(
+                            &mut lines,
+                            &mut line_map,
+                            message_index,
+                            Line::from(vec![
+                                Span::styled("  \u{25be} ", Style::default().fg(Theme::cyan())),
+                                Span::styled("shizuka ", Theme::shizuka_message()),
+                            ]),
+                        );
+                        for line in msg.content.lines() {
+                            push_line(
+                                &mut lines,
+                                &mut line_map,
+                                message_index,
+                                Line::from(vec![
+                                    Span::styled("    ", Style::default()),
+                                    Span::styled(line.to_string(), Theme::shizuka_message()),
+                                ]),
+                            );
                         }
                     }
-                    lines.push(Line::default());
+                    push_blank(&mut lines, &mut line_map, message_index);
+                }
+                MessageType::ToolResult {
+                    name,
+                    success,
+                    file_path,
+                    diff,
+                    exit_code,
+                    duration_ms,
+                } => {
+                    let icon = if *success { "\u{2713}" } else { "\u{2717}" };
+                    let icon_color = if *success {
+                        Theme::green()
+                    } else {
+                        Theme::red()
+                    };
+                    let meta = build_tool_meta(file_path.as_deref(), *exit_code, *duration_ms);
+
+                    let preview_source = diff.as_ref().unwrap_or(&msg.content);
+                    let preview_line = preview_source
+                        .lines()
+                        .find(|line| !line.trim().is_empty())
+                        .unwrap_or("");
+
+                    if msg.collapsed {
+                        push_line(
+                            &mut lines,
+                            &mut line_map,
+                            message_index,
+                            Line::from(vec![
+                                Span::styled(
+                                    "  \u{25b8} ",
+                                    Style::default().fg(Theme::text_muted()),
+                                ),
+                                Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+                                Span::styled(
+                                    format!("{} ", name),
+                                    Style::default().fg(Theme::text_dim()),
+                                ),
+                                Span::styled(meta, Style::default().fg(Theme::text_muted())),
+                                Span::styled(
+                                    format!(
+                                        "  {}",
+                                        preview_line.chars().take(56).collect::<String>()
+                                    ),
+                                    Style::default().fg(Theme::text_muted()),
+                                ),
+                            ]),
+                        );
+                    } else {
+                        push_line(
+                            &mut lines,
+                            &mut line_map,
+                            message_index,
+                            Line::from(vec![
+                                Span::styled("  ", Style::default()),
+                                Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+                                Span::styled(
+                                    name.to_string(),
+                                    Style::default()
+                                        .fg(Theme::text_dim())
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(meta, Style::default().fg(Theme::text_muted())),
+                            ]),
+                        );
+
+                        if let Some(diff) = diff {
+                            for diff_line in diff.lines().take(32) {
+                                push_line(
+                                    &mut lines,
+                                    &mut line_map,
+                                    message_index,
+                                    Line::from(vec![
+                                        Span::styled("    ", Style::default()),
+                                        Span::styled(diff_line.to_string(), diff_style(diff_line)),
+                                    ]),
+                                );
+                            }
+                            let total = diff.lines().count();
+                            if total > 32 {
+                                push_line(
+                                    &mut lines,
+                                    &mut line_map,
+                                    message_index,
+                                    Line::from(Span::styled(
+                                        format!("    ... {} more diff lines", total - 32),
+                                        Style::default().fg(Theme::text_muted()),
+                                    )),
+                                );
+                            }
+                        } else {
+                            for content_line in msg.content.lines().take(20) {
+                                push_line(
+                                    &mut lines,
+                                    &mut line_map,
+                                    message_index,
+                                    Line::from(vec![
+                                        Span::styled("    ", Style::default()),
+                                        Span::styled(
+                                            content_line.to_string(),
+                                            Style::default().fg(Theme::text_muted()),
+                                        ),
+                                    ]),
+                                );
+                            }
+                            let total = msg.content.lines().count();
+                            if total > 20 {
+                                push_line(
+                                    &mut lines,
+                                    &mut line_map,
+                                    message_index,
+                                    Line::from(Span::styled(
+                                        format!("    ... {} more lines", total - 20),
+                                        Style::default().fg(Theme::text_muted()),
+                                    )),
+                                );
+                            }
+                        }
+                    }
+                    push_blank(&mut lines, &mut line_map, message_index);
                 }
                 MessageType::User => {
-                    lines.push(Line::from(vec![
-                        Span::styled("  > ", Style::default().fg(Theme::mauve())),
-                        Span::styled(
-                            msg.content.lines().next().unwrap_or("").to_string(),
-                            Theme::user_message(),
-                        ),
-                    ]));
+                    push_line(
+                        &mut lines,
+                        &mut line_map,
+                        message_index,
+                        Line::from(vec![
+                            Span::styled("  > ", Style::default().fg(Theme::mauve())),
+                            Span::styled(
+                                msg.content.lines().next().unwrap_or("").to_string(),
+                                Theme::user_message(),
+                            ),
+                        ]),
+                    );
                     for line in msg.content.lines().skip(1) {
-                        lines.push(Line::from(vec![
-                            Span::styled("    ", Style::default()),
-                            Span::styled(line.to_string(), Theme::user_message()),
-                        ]));
+                        push_line(
+                            &mut lines,
+                            &mut line_map,
+                            message_index,
+                            Line::from(vec![
+                                Span::styled("    ", Style::default()),
+                                Span::styled(line.to_string(), Theme::user_message()),
+                            ]),
+                        );
                     }
-                    lines.push(Line::default());
+                    push_blank(&mut lines, &mut line_map, message_index);
                 }
                 MessageType::Nano => {
                     for line in msg.content.lines() {
-                        lines.push(Line::from(vec![
-                            Span::styled("  ", Style::default()),
-                            Span::styled(line.to_string(), Theme::nano_message()),
-                        ]));
+                        push_line(
+                            &mut lines,
+                            &mut line_map,
+                            message_index,
+                            Line::from(vec![
+                                Span::styled("  ", Style::default()),
+                                Span::styled(line.to_string(), Theme::nano_message()),
+                            ]),
+                        );
                     }
-                    lines.push(Line::default());
+                    push_blank(&mut lines, &mut line_map, message_index);
                 }
                 MessageType::Warning => {
-                    lines.push(Line::from(vec![
-                        Span::styled("  ! ", Style::default().fg(Theme::yellow())),
-                        Span::styled(msg.content.clone(), Theme::warning()),
-                    ]));
-                    lines.push(Line::default());
+                    push_line(
+                        &mut lines,
+                        &mut line_map,
+                        message_index,
+                        Line::from(vec![
+                            Span::styled("  ! ", Style::default().fg(Theme::yellow())),
+                            Span::styled(msg.content.clone(), Theme::warning()),
+                        ]),
+                    );
+                    push_blank(&mut lines, &mut line_map, message_index);
                 }
                 MessageType::Error => {
-                    lines.push(Line::from(vec![
-                        Span::styled("  \u{2717} ", Style::default().fg(Theme::red())),
-                        Span::styled(msg.content.clone(), Theme::error()),
-                    ]));
-                    lines.push(Line::default());
+                    push_line(
+                        &mut lines,
+                        &mut line_map,
+                        message_index,
+                        Line::from(vec![
+                            Span::styled("  \u{2717} ", Style::default().fg(Theme::red())),
+                            Span::styled(msg.content.clone(), Theme::error()),
+                        ]),
+                    );
+                    push_blank(&mut lines, &mut line_map, message_index);
                 }
                 MessageType::System => {
                     for line in msg.content.lines() {
-                        lines.push(Line::from(vec![
-                            Span::styled("  ", Style::default()),
-                            Span::styled(line.to_string(), Style::default().fg(Theme::text_dim())),
-                        ]));
+                        push_line(
+                            &mut lines,
+                            &mut line_map,
+                            message_index,
+                            Line::from(vec![
+                                Span::styled("  ", Style::default()),
+                                Span::styled(
+                                    line.to_string(),
+                                    Style::default().fg(Theme::text_dim()),
+                                ),
+                            ]),
+                        );
                     }
-                    lines.push(Line::default());
+                    push_blank(&mut lines, &mut line_map, message_index);
                 }
             }
         }
 
-        lines
+        (lines, line_map)
     }
 
     pub fn tick_smooth_scroll(&mut self) {
@@ -293,7 +524,8 @@ impl MessageList {
         self.auto_collapse_old_thinking();
         self.tick_smooth_scroll();
 
-        let all_lines = self.build_lines();
+        let (all_lines, line_map) = self.build_lines();
+        self.last_line_map = line_map;
         let total_lines = all_lines.len();
         let visible_height = area.height as usize;
 
@@ -315,16 +547,74 @@ impl MessageList {
 
         frame.render_widget(paragraph, area);
 
-        // Scrollbar
         if total_lines > visible_height {
             let mut scrollbar_state = ScrollbarState::new(total_lines)
                 .position(self.scroll_offset)
                 .viewport_content_length(visible_height);
 
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .style(Style::default().fg(Theme::border()));
+                .style(Style::default().fg(Theme::border_focus()));
 
             frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
         }
     }
+}
+
+fn build_tool_meta(
+    file_path: Option<&str>,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
+) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(file_path) = file_path {
+        parts.push(format!(" · {}", file_path));
+    }
+    if let Some(exit_code) = exit_code {
+        parts.push(format!(" · exit {}", exit_code));
+    }
+    if let Some(duration_ms) = duration_ms {
+        if duration_ms >= 1000 {
+            parts.push(format!(" · {:.1}s", duration_ms as f64 / 1000.0));
+        } else {
+            parts.push(format!(" · {}ms", duration_ms));
+        }
+    }
+
+    parts.join("")
+}
+
+fn diff_style(line: &str) -> Style {
+    if line.starts_with("+++") || line.starts_with("---") {
+        Style::default()
+            .fg(Theme::lavender())
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with("@@") {
+        Style::default().fg(Theme::mauve())
+    } else if line.starts_with('+') {
+        Style::default().fg(Theme::green())
+    } else if line.starts_with('-') {
+        Style::default().fg(Theme::red())
+    } else {
+        Style::default().fg(Theme::text_muted())
+    }
+}
+
+fn push_line(
+    lines: &mut Vec<Line<'static>>,
+    line_map: &mut Vec<Option<usize>>,
+    message_index: usize,
+    line: Line<'static>,
+) {
+    lines.push(line);
+    line_map.push(Some(message_index));
+}
+
+fn push_blank(
+    lines: &mut Vec<Line<'static>>,
+    line_map: &mut Vec<Option<usize>>,
+    message_index: usize,
+) {
+    lines.push(Line::default());
+    line_map.push(Some(message_index));
 }

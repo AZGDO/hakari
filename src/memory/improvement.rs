@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use super::kms::Kms;
 use super::kpms::Kpms;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreparationMiss {
@@ -51,7 +51,9 @@ pub fn collect_iteration_record(kms: &Kms) -> IterationRecord {
     let mut writes_per_file = std::collections::HashMap::new();
     for step in &kms.steps.history {
         if step.tool == "Write" {
-            *writes_per_file.entry(step.params_summary.clone()).or_insert(0) += 1;
+            *writes_per_file
+                .entry(step.params_summary.clone())
+                .or_insert(0) += 1;
         }
     }
 
@@ -75,13 +77,22 @@ pub fn persist_improvements(
 ) {
     for miss in misses {
         kpms.add_learning(
-            &format!("When working on {} with files {:?}", miss.task_type, miss.target_files),
-            &format!("Also need file: {} ({})", miss.missed_file, miss.reason_needed),
+            &format!(
+                "When working on {} with files {:?}",
+                miss.task_type, miss.target_files
+            ),
+            &format!(
+                "Also need file: {} ({})",
+                miss.missed_file, miss.reason_needed
+            ),
             session_id,
         );
     }
 
-    let existing_strategy = kpms.strategies.iter_mut().find(|s| s.task_type == record.task_type);
+    let existing_strategy = kpms
+        .strategies
+        .iter_mut()
+        .find(|s| s.task_type == record.task_type);
     if let Some(strategy) = existing_strategy {
         if record.success {
             strategy.success_count += 1;

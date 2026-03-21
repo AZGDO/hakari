@@ -23,10 +23,15 @@ impl EscalationEngine {
 
     pub fn evaluate(&mut self, kms: &Kms, max_tool_calls: usize) -> EscalationAction {
         let step = kms.steps.current;
-        let error_count = kms.errors.iter()
+        let error_count = kms
+            .errors
+            .iter()
             .filter(|e| e.resolution_status != "resolved")
             .count();
-        let failed_attempts = kms.task.attempt_history.iter()
+        let failed_attempts = kms
+            .task
+            .attempt_history
+            .iter()
             .filter(|a| a.reason_for_failure.is_some())
             .count();
 
@@ -62,7 +67,10 @@ impl EscalationEngine {
             && self.current_level == EscalationLevel::None
         {
             self.current_level = EscalationLevel::SoftRedirection;
-            let approaches: Vec<String> = kms.task.attempt_history.iter()
+            let approaches: Vec<String> = kms
+                .task
+                .attempt_history
+                .iter()
                 .map(|a| a.approach_description.clone())
                 .collect();
             return EscalationAction::SoftRedirection {
@@ -89,10 +97,19 @@ impl EscalationEngine {
 #[derive(Debug)]
 pub enum EscalationAction {
     Continue,
-    SoftRedirection { message: String },
-    HardConstraint { message: String, restrict_writes: Vec<String> },
-    HardStop { message: String },
-    UserEscalation { summary: String },
+    SoftRedirection {
+        message: String,
+    },
+    HardConstraint {
+        message: String,
+        restrict_writes: Vec<String>,
+    },
+    HardStop {
+        message: String,
+    },
+    UserEscalation {
+        summary: String,
+    },
 }
 
 fn build_escalation_summary(kms: &Kms) -> String {
@@ -112,10 +129,7 @@ fn build_escalation_summary(kms: &Kms) -> String {
     summary.push_str("\n## Unresolved Errors\n");
     for error in &kms.errors {
         if error.resolution_status != "resolved" {
-            summary.push_str(&format!(
-                "- Step {}: {}\n",
-                error.step, error.error_message
-            ));
+            summary.push_str(&format!("- Step {}: {}\n", error.step, error.error_message));
         }
     }
 
@@ -130,11 +144,15 @@ fn build_escalation_summary(kms: &Kms) -> String {
 }
 
 fn find_problematic_files(kms: &Kms) -> Vec<String> {
-    kms.files.index.iter()
+    kms.files
+        .index
+        .iter()
         .filter(|(_, info)| {
-            info.is_modified && kms.errors.iter().any(|e| {
-                e.file.as_deref() == Some(info.purpose.as_str()) && e.resolution_status != "resolved"
-            })
+            info.is_modified
+                && kms.errors.iter().any(|e| {
+                    e.file.as_deref() == Some(info.purpose.as_str())
+                        && e.resolution_status != "resolved"
+                })
         })
         .map(|(path, _)| path.clone())
         .collect()

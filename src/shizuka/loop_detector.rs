@@ -29,11 +29,10 @@ impl LoopDetector {
         // Check exact repetition
         if let Some(count) = self.call_counts.get(call_hash) {
             if *count >= 2 {
-                let prev_step = kms.steps.history.iter().rev()
-                    .find(|s| {
-                        let h = format!("{}:{}", s.tool, s.params_summary);
-                        h == *call_hash || call_hash.contains(&s.params_summary)
-                    });
+                let prev_step = kms.steps.history.iter().rev().find(|s| {
+                    let h = format!("{}:{}", s.tool, s.params_summary);
+                    h == *call_hash || call_hash.contains(&s.params_summary)
+                });
                 if let Some(prev) = prev_step {
                     return Some(format!(
                         "You already performed this exact action at step {}. The result was: {}",
@@ -51,11 +50,16 @@ impl LoopDetector {
         // Check read-read cycle (same file read multiple times without write)
         if tool_name == "Read" {
             let path = call_hash.strip_prefix("Read:").unwrap_or(call_hash);
-            let read_count = self.recent_calls.iter()
+            let read_count = self
+                .recent_calls
+                .iter()
                 .filter(|c| c.starts_with("Read:") && c.contains(path))
                 .count();
             if read_count >= 2 {
-                return Some("This file is now pinned in your context. You don't need to read it again.".to_string());
+                return Some(
+                    "This file is now pinned in your context. You don't need to read it again."
+                        .to_string(),
+                );
             }
         }
 
@@ -86,7 +90,8 @@ impl LoopDetector {
         let attempts = self.approach_hashes.entry(hash.clone()).or_default();
 
         if attempts.len() >= 3 {
-            let reasons: Vec<&str> = attempts.iter()
+            let reasons: Vec<&str> = attempts
+                .iter()
                 .filter(|a| !a.success)
                 .map(|a| a.description.as_str())
                 .collect();
@@ -112,15 +117,26 @@ impl LoopDetector {
     }
 
     pub fn check_write_error_cycle(&self, file_path: &str, kms: &Kms) -> Option<String> {
-        let recent_writes: Vec<&crate::memory::kms::StepRecord> = kms.steps.history.iter().rev()
+        let recent_writes: Vec<&crate::memory::kms::StepRecord> = kms
+            .steps
+            .history
+            .iter()
+            .rev()
             .filter(|s| s.tool == "Write" && s.params_summary.contains(file_path))
             .take(6)
             .collect();
 
         let failed_count = recent_writes.iter().filter(|s| !s.success).count();
         if failed_count >= 3 {
-            let approaches: Vec<String> = recent_writes.iter()
-                .map(|s| format!("Step {}: {}", s.step, &s.result_summary[..s.result_summary.len().min(80)]))
+            let approaches: Vec<String> = recent_writes
+                .iter()
+                .map(|s| {
+                    format!(
+                        "Step {}: {}",
+                        s.step,
+                        &s.result_summary[..s.result_summary.len().min(80)]
+                    )
+                })
                 .collect();
             return Some(format!(
                 "You have attempted to fix this file {} times. Previous approaches: [{}]. Consider a fundamentally different approach or ask the user for clarification.",

@@ -1,7 +1,7 @@
-pub mod read;
-pub mod write;
 pub mod execute;
+pub mod read;
 pub mod summon;
+pub mod write;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,7 @@ pub struct ToolResult {
 pub struct ToolResultMetadata {
     pub file_path: Option<String>,
     pub lines_changed: Option<String>,
+    pub diff: Option<String>,
     pub lint_warnings: Vec<String>,
     pub related_tests: Vec<String>,
     pub exit_code: Option<i32>,

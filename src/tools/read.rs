@@ -4,12 +4,7 @@ use crate::memory::kpms::Kpms;
 use crate::project::parser::generate_compact_summary;
 use std::path::{Path, PathBuf};
 
-pub fn execute_read(
-    project_dir: &Path,
-    path: &str,
-    kms: &mut Kms,
-    kpms: &Kpms,
-) -> ToolResult {
+pub fn execute_read(project_dir: &Path, path: &str, kms: &mut Kms, kpms: &Kpms) -> ToolResult {
     let full_path = resolve_path(project_dir, path);
 
     if !full_path.exists() {
@@ -54,7 +49,10 @@ pub fn execute_read(
     // For large files, add structural map
     if line_count > 2000 {
         let structure_map = generate_compact_summary(&full_path, &content);
-        output.push_str(&format!("[Structure map ({} lines)]\n{}\n\n", line_count, structure_map));
+        output.push_str(&format!(
+            "[Structure map ({} lines)]\n{}\n\n",
+            line_count, structure_map
+        ));
     }
 
     output.push_str(&content);

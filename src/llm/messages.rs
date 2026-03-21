@@ -30,30 +30,33 @@ impl MessageContent {
     pub fn as_text(&self) -> &str {
         match self {
             MessageContent::Text(s) => s,
-            MessageContent::Blocks(blocks) => {
-                blocks.iter().find_map(|b| {
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .find_map(|b| {
                     if let ContentBlock::Text { text } = b {
                         Some(text.as_str())
                     } else {
                         None
                     }
-                }).unwrap_or("")
-            }
+                })
+                .unwrap_or(""),
         }
     }
 
     pub fn to_text_string(&self) -> String {
         match self {
             MessageContent::Text(s) => s.clone(),
-            MessageContent::Blocks(blocks) => {
-                blocks.iter().filter_map(|b| {
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| {
                     if let ContentBlock::Text { text } = b {
                         Some(text.as_str())
                     } else {
                         None
                     }
-                }).collect::<Vec<_>>().join("\n")
-            }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 }
@@ -136,7 +139,9 @@ pub struct ConversationHistory {
 
 impl ConversationHistory {
     pub fn new() -> Self {
-        Self { messages: Vec::new() }
+        Self {
+            messages: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, message: Message) {
@@ -150,19 +155,26 @@ impl ConversationHistory {
     }
 
     pub fn find_tool_result_indices_for_file(&self, file_path: &str) -> Vec<usize> {
-        self.messages.iter().enumerate().filter_map(|(i, msg)| {
-            if msg.role == Role::Tool && msg.content.as_text().contains(file_path) {
-                Some(i)
-            } else {
-                None
-            }
-        }).collect()
+        self.messages
+            .iter()
+            .enumerate()
+            .filter_map(|(i, msg)| {
+                if msg.role == Role::Tool && msg.content.as_text().contains(file_path) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub fn estimate_tokens(&self) -> usize {
-        self.messages.iter().map(|m| {
-            let text_len = m.content.to_text_string().len();
-            text_len / 4
-        }).sum()
+        self.messages
+            .iter()
+            .map(|m| {
+                let text_len = m.content.to_text_string().len();
+                text_len / 4
+            })
+            .sum()
     }
 }

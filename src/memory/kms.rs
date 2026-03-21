@@ -167,7 +167,13 @@ impl Kms {
         }
     }
 
-    pub fn record_step(&mut self, tool: &str, params_summary: &str, result_summary: &str, success: bool) {
+    pub fn record_step(
+        &mut self,
+        tool: &str,
+        params_summary: &str,
+        result_summary: &str,
+        success: bool,
+    ) {
         let step = self.steps.current;
         self.steps.history.push(StepRecord {
             step,
@@ -181,16 +187,20 @@ impl Kms {
 
     pub fn record_file_read(&mut self, path: &str, summary: Option<String>) {
         let step = self.steps.current;
-        let entry = self.files.index.entry(path.to_string()).or_insert_with(|| FileInfo {
-            purpose: String::new(),
-            last_read_step: None,
-            last_write_step: None,
-            in_context: false,
-            ttl_remaining: Some(6),
-            compact_summary: None,
-            is_modified: false,
-            is_active: false,
-        });
+        let entry = self
+            .files
+            .index
+            .entry(path.to_string())
+            .or_insert_with(|| FileInfo {
+                purpose: String::new(),
+                last_read_step: None,
+                last_write_step: None,
+                in_context: false,
+                ttl_remaining: Some(6),
+                compact_summary: None,
+                is_modified: false,
+                is_active: false,
+            });
         entry.last_read_step = Some(step);
         entry.in_context = true;
         if let Some(s) = summary {
@@ -200,16 +210,20 @@ impl Kms {
 
     pub fn record_file_write(&mut self, path: &str, original_content: Option<String>) {
         let step = self.steps.current;
-        let entry = self.files.index.entry(path.to_string()).or_insert_with(|| FileInfo {
-            purpose: String::new(),
-            last_read_step: None,
-            last_write_step: None,
-            in_context: false,
-            ttl_remaining: None,
-            compact_summary: None,
-            is_modified: false,
-            is_active: false,
-        });
+        let entry = self
+            .files
+            .index
+            .entry(path.to_string())
+            .or_insert_with(|| FileInfo {
+                purpose: String::new(),
+                last_read_step: None,
+                last_write_step: None,
+                in_context: false,
+                ttl_remaining: None,
+                compact_summary: None,
+                is_modified: false,
+                is_active: false,
+            });
         entry.last_write_step = Some(step);
         entry.is_modified = true;
         entry.is_active = true;
@@ -221,7 +235,10 @@ impl Kms {
         }
 
         if let Some(content) = original_content {
-            self.files.backups.entry(path.to_string()).or_insert(content);
+            self.files
+                .backups
+                .entry(path.to_string())
+                .or_insert(content);
         }
     }
 
@@ -235,7 +252,9 @@ impl Kms {
     }
 
     pub fn get_write_count_for_file(&self, path: &str) -> usize {
-        self.steps.history.iter()
+        self.steps
+            .history
+            .iter()
             .filter(|s| s.tool == "Write" && s.params_summary.contains(path))
             .count()
     }

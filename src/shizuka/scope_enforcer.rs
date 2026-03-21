@@ -59,7 +59,8 @@ impl ScopeEnforcer {
     }
 
     pub fn get_unpredicted_reads(&self) -> Vec<String> {
-        self.read_files.iter()
+        self.read_files
+            .iter()
             .filter(|p| !self.scope_files.contains(*p))
             .cloned()
             .collect()

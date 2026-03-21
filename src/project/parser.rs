@@ -65,14 +65,19 @@ fn generate_js_ts_summary(content: &str) -> String {
         if trimmed.starts_with("import ") {
             imports.push(trimmed.to_string());
         } else if trimmed.starts_with("export default ") || trimmed.starts_with("export ") {
-            if trimmed.contains("function ") || trimmed.contains("const ") || trimmed.contains("class ") {
+            if trimmed.contains("function ")
+                || trimmed.contains("const ")
+                || trimmed.contains("class ")
+            {
                 exports.push(extract_until(trimmed, '{').trim_end().to_string());
             } else if trimmed.contains("interface ") || trimmed.contains("type ") {
                 types.push(extract_until(trimmed, '{').trim_end().to_string());
             }
         } else if trimmed.starts_with("function ") {
             functions.push(extract_until(trimmed, '{').trim_end().to_string());
-        } else if trimmed.starts_with("interface ") || (trimmed.starts_with("type ") && trimmed.contains('=')) {
+        } else if trimmed.starts_with("interface ")
+            || (trimmed.starts_with("type ") && trimmed.contains('='))
+        {
             types.push(extract_until(trimmed, '{').trim_end().to_string());
         }
     }
@@ -156,7 +161,11 @@ fn generate_go_summary(content: &str) -> String {
 fn generate_generic_summary(content: &str) -> String {
     let line_count = content.lines().count();
     let first_lines: Vec<&str> = content.lines().take(5).collect();
-    format!("Lines: {}\nPreview: {}", line_count, first_lines.join(" | "))
+    format!(
+        "Lines: {}\nPreview: {}",
+        line_count,
+        first_lines.join(" | ")
+    )
 }
 
 fn extract_until(s: &str, ch: char) -> &str {

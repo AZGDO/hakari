@@ -10,10 +10,16 @@ pub struct OpenAiProvider {
     base_url: String,
     model: String,
     is_copilot: bool,
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAiProvider {
-    pub fn new(api_key: String, base_url: String, model: String) -> Self {
+    pub fn new(
+        api_key: String,
+        base_url: String,
+        model: String,
+        reasoning_effort: Option<String>,
+    ) -> Self {
         let is_copilot = base_url.contains("githubcopilot.com");
         Self {
             client: Client::new(),
@@ -21,35 +27,42 @@ impl OpenAiProvider {
             base_url,
             model,
             is_copilot,
+            reasoning_effort,
         }
     }
 
     fn convert_messages(&self, messages: &[Message]) -> Vec<Value> {
-        messages.iter().map(|msg| {
-            let mut obj = json!({
-                "role": match msg.role {
-                    Role::System => "system",
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::Tool => "tool",
-                },
-                "content": msg.content.to_text_string(),
-            });
-            if let Some(tool_calls) = &msg.tool_calls {
-                obj["tool_calls"] = json!(tool_calls.iter().map(|tc| json!({
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": tc.arguments.to_string(),
-                    }
-                })).collect::<Vec<_>>());
-            }
-            if let Some(tool_call_id) = &msg.tool_call_id {
-                obj["tool_call_id"] = json!(tool_call_id);
-            }
-            obj
-        }).collect()
+        messages
+            .iter()
+            .map(|msg| {
+                let mut obj = json!({
+                    "role": match msg.role {
+                        Role::System => "system",
+                        Role::User => "user",
+                        Role::Assistant => "assistant",
+                        Role::Tool => "tool",
+                    },
+                    "content": msg.content.to_text_string(),
+                });
+                if let Some(tool_calls) = &msg.tool_calls {
+                    obj["tool_calls"] = json!(tool_calls
+                        .iter()
+                        .map(|tc| json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.arguments.to_string(),
+                            }
+                        }))
+                        .collect::<Vec<_>>());
+                }
+                if let Some(tool_call_id) = &msg.tool_call_id {
+                    obj["tool_call_id"] = json!(tool_call_id);
+                }
+                obj
+            })
+            .collect()
     }
 
     pub async fn chat(
@@ -70,13 +83,22 @@ impl OpenAiProvider {
             body["tools"] = json!(tools);
         }
 
-        let mut request = self.client
+        if let Some(reasoning_effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = json!(reasoning_effort);
+        }
+
+        let mut request = self
+            .client
             .post(format!("{}/chat/completions", self.base_url))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json");
 
         if self.is_copilot {
-            request = request.header("Copilot-Integration-Id", "vscode-chat");
+            request = request
+                .header("Copilot-Integration-Id", "vscode-chat")
+                .header("Editor-Version", "vscode/1.99.0")
+                .header("Editor-Plugin-Version", "copilot-chat/0.1.85")
+                .header("User-Agent", "hakari/0.1.0");
         }
 
         let response = request.json(&body).send().await?;
@@ -129,7 +151,8 @@ impl OpenAiProvider {
 
                                     if let Some(content) = delta["content"].as_str() {
                                         text_content.push_str(content);
-                                        let _ = tx.send(StreamEvent::TextDelta(content.to_string()));
+                                        let _ =
+                                            tx.send(StreamEvent::TextDelta(content.to_string()));
                                     }
 
                                     if let Some(tcs) = delta["tool_calls"].as_array() {
@@ -137,7 +160,8 @@ impl OpenAiProvider {
                                             let idx = tc["index"].as_u64().unwrap_or(0) as usize;
                                             if let Some(func) = tc.get("function") {
                                                 if let Some(name) = func["name"].as_str() {
-                                                    let id = tc["id"].as_str().unwrap_or("").to_string();
+                                                    let id =
+                                                        tc["id"].as_str().unwrap_or("").to_string();
                                                     while tool_calls.len() <= idx {
                                                         tool_calls.push(ToolCall {
                                                             id: String::new(),
@@ -148,8 +172,11 @@ impl OpenAiProvider {
                                                     tool_calls[idx].id = id.clone();
                                                     tool_calls[idx].name = name.to_string();
 
-                                                    if let Some(prev_idx) = current_tool_idx.take() {
-                                                        if let Some(prev_tc) = tool_calls.get_mut(prev_idx) {
+                                                    if let Some(prev_idx) = current_tool_idx.take()
+                                                    {
+                                                        if let Some(prev_tc) =
+                                                            tool_calls.get_mut(prev_idx)
+                                                        {
                                                             prev_tc.arguments = serde_json::from_str(&current_tool_args)
                                                                 .unwrap_or(json!(current_tool_args));
                                                         }
@@ -164,7 +191,11 @@ impl OpenAiProvider {
                                                 }
                                                 if let Some(args) = func["arguments"].as_str() {
                                                     current_tool_args.push_str(args);
-                                                    let _ = tx.send(StreamEvent::ToolCallArgumentsDelta(args.to_string()));
+                                                    let _ = tx.send(
+                                                        StreamEvent::ToolCallArgumentsDelta(
+                                                            args.to_string(),
+                                                        ),
+                                                    );
                                                 }
                                             }
                                         }
@@ -198,7 +229,11 @@ impl OpenAiProvider {
                     let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
                     let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
                     let arguments: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
-                    tool_calls.push(ToolCall { id, name, arguments });
+                    tool_calls.push(ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    });
                 }
             }
 

@@ -1,5 +1,5 @@
-use std::path::Path;
 use crate::memory::kpms::Kpms;
+use std::path::Path;
 
 pub struct ValidationEngine;
 
@@ -18,11 +18,9 @@ impl ValidationEngine {
 
     fn parse_check(ext: &str, content: &str) -> Option<String> {
         match ext {
-            "json" => {
-                serde_json::from_str::<serde_json::Value>(content)
-                    .err()
-                    .map(|e| format!("Invalid JSON at line {}: {}", e.line(), e))
-            }
+            "json" => serde_json::from_str::<serde_json::Value>(content)
+                .err()
+                .map(|e| format!("Invalid JSON at line {}: {}", e.line(), e)),
             "rs" => Self::basic_bracket_check(content, '{', '}'),
             "ts" | "tsx" | "js" | "jsx" => Self::basic_bracket_check(content, '{', '}'),
             "py" => {
@@ -36,7 +34,9 @@ impl ValidationEngine {
                     if indent > prev_indent + 8 {
                         return Some(format!(
                             "Suspicious indent jump at line {} (from {} to {} spaces)",
-                            i + 1, prev_indent, indent
+                            i + 1,
+                            prev_indent,
+                            indent
                         ));
                     }
                     prev_indent = indent;
@@ -88,7 +88,10 @@ impl ValidationEngine {
         }
 
         if depth > 0 {
-            Some(format!("Unclosed '{}' — {} more '{}' needed", open, depth, close))
+            Some(format!(
+                "Unclosed '{}' — {} more '{}' needed",
+                open, depth, close
+            ))
         } else {
             None
         }
@@ -105,7 +108,9 @@ impl ValidationEngine {
             parent.join(format!("{}.test.{}", stem, ext)),
             parent.join(format!("{}.spec.{}", stem, ext)),
             parent.join(format!("{}_test.{}", stem, ext)),
-            parent.join("__tests__").join(format!("{}.test.{}", stem, ext)),
+            parent
+                .join("__tests__")
+                .join(format!("{}.test.{}", stem, ext)),
             parent.join("tests").join(format!("test_{}.{}", stem, ext)),
         ];
 
@@ -119,11 +124,7 @@ impl ValidationEngine {
         tests
     }
 
-    pub fn run_lint(
-        project_dir: &Path,
-        file_path: &Path,
-        lint_command: &str,
-    ) -> Vec<String> {
+    pub fn run_lint(project_dir: &Path, file_path: &Path, lint_command: &str) -> Vec<String> {
         if lint_command.is_empty() {
             return Vec::new();
         }
@@ -142,7 +143,8 @@ impl ValidationEngine {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let combined = format!("{}\n{}", stdout, stderr);
-                    combined.lines()
+                    combined
+                        .lines()
                         .filter(|l| !l.trim().is_empty())
                         .take(10)
                         .map(|l| l.to_string())

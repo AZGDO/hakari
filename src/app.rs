@@ -1,10 +1,10 @@
 use crate::auth::copilot;
 use crate::config::{HakariConfig, ModelCategory, ReasoningLevel};
 use crate::llm::client::LlmClient;
+use crate::memory::improvement;
 use crate::memory::kkm::Kkm;
 use crate::memory::kms::Kms;
 use crate::memory::kpms::Kpms;
-use crate::memory::improvement;
 use crate::nano::agent::{AgentEvent, NanoAgent};
 use crate::project::detector;
 use crate::shizuka::preparation;
@@ -15,14 +15,20 @@ use crate::tui::theme::Theme;
 use crate::tui::widgets::header::{self, AuthDisplay, HeaderData};
 use crate::tui::widgets::input_bar::InputBar;
 use crate::tui::widgets::message_list::{ChatMessage, MessageList, MessageType};
-use crate::tui::widgets::popup::{ConnectState, ModelEntry, ModelListDisplay, ModelTarget, Popup, PopupType, SettingEntry};
+use crate::tui::widgets::popup::{
+    ConnectState, ModelEntry, ModelListDisplay, ModelTarget, Popup, PopupMouseAction, PopupType,
+    SettingEntry,
+};
 use crate::tui::widgets::progress::Spinner;
 use crate::tui::widgets::status_bar::{self, AgentStatus, StatusBarData};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::prelude::*;
+use similar::TextDiff;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+const ASCII_ART: &str = include_str!("../ascii.txt");
 
 pub enum AppMode {
     Input,
@@ -57,13 +63,15 @@ pub struct App {
     pub connect_polling: bool,
     pub connect_state: Option<copilot::DeviceFlowState>,
     pub connect_rx: Option<mpsc::UnboundedReceiver<ConnectEvent>>,
-    pub model_rx: Option<mpsc::UnboundedReceiver<Vec<copilot::CopilotModel>>>,
+    pub model_rx: Option<mpsc::UnboundedReceiver<Result<Vec<copilot::CopilotModel>, String>>>,
     pub usage_rx: Option<mpsc::UnboundedReceiver<copilot::CopilotUsage>>,
     pub copilot_usage: Option<copilot::CopilotUsage>,
     pub tick_count: u64,
     pub model_fetch_target: ModelTarget,
     pub welcome_shown: bool,
     pub reinstall_pending: bool,
+    pub last_layout: Option<AppLayout>,
+    pub last_frame_area: Rect,
 }
 
 #[derive(Debug)]
@@ -99,6 +107,9 @@ impl App {
                 max_steps: 0,
                 context_tokens: 0,
                 status: AgentStatus::Ready,
+                modified_files: 0,
+                pinned_files: 0,
+                activity: None,
             },
             mode: AppMode::Input,
             popup: None,
@@ -117,6 +128,8 @@ impl App {
             model_fetch_target: ModelTarget::Nano,
             welcome_shown: false,
             reinstall_pending: false,
+            last_layout: None,
+            last_frame_area: Rect::default(),
         };
 
         if app.kpms.project.name.is_empty() {
@@ -148,17 +161,15 @@ impl App {
         }
         self.welcome_shown = true;
 
-        let ascii_content = match std::fs::read_to_string("ascii.txt") {
-            Ok(content) => content,
-            Err(_) => "ASCII art not found.".to_string(),
-        };
-
-        let lines: Vec<String> = ascii_content.lines().map(|s| s.to_string()).collect();
+        let lines: Vec<String> = ASCII_ART.lines().map(|s| s.to_string()).collect();
         let max_width = lines.iter().map(|l| l.len()).max().unwrap_or(0);
         let border_line = "─".repeat(max_width);
-        let enhanced_ascii = format!("┌{}┐\n", border_line) +
-            &lines.iter().map(|l| format!("│{}│\n", l)).collect::<String>() +
-            &format!("└{}┘", border_line);
+        let enhanced_ascii = format!("┌{}┐\n", border_line)
+            + &lines
+                .iter()
+                .map(|l| format!("│{}│\n", l))
+                .collect::<String>()
+            + &format!("└{}┘", border_line);
 
         self.message_list.add_message(ChatMessage {
             msg_type: MessageType::Welcome,
@@ -181,7 +192,11 @@ impl App {
             "  {} v0.1.0 \u{2502} {} ({}) \u{2502} #{}\n",
             "HAKARI",
             self.kpms.project.name,
-            if self.kpms.project.language.is_empty() { "unknown" } else { &self.kpms.project.language },
+            if self.kpms.project.language.is_empty() {
+                "unknown"
+            } else {
+                &self.kpms.project.language
+            },
             &self.kms.session_id[..8],
         );
         info.push_str(&format!(
@@ -215,7 +230,9 @@ impl App {
         if !copilot::is_authenticated() && self.llm_client.is_none() {
             self.message_list.add_message(ChatMessage {
                 msg_type: MessageType::System,
-                content: "  Use /connect to authenticate, or set OPENAI_API_KEY / ANTHROPIC_API_KEY.".to_string(),
+                content:
+                    "  Use /connect to authenticate, or set OPENAI_API_KEY / ANTHROPIC_API_KEY."
+                        .to_string(),
                 timestamp: None,
                 collapsed: false,
             });
@@ -401,19 +418,22 @@ impl App {
     fn handle_popup_enter(&mut self) {
         let action = if let Some(ref popup) = self.popup {
             match &popup.popup_type {
-                PopupType::ModelSelector { models, selected, target, .. } => {
-                    models.get(*selected).map(|m| PopupEnterAction::SelectModel(m.id.clone(), target.clone()))
-                }
-                PopupType::ReasoningSelector { levels, selected } => {
-                    levels.get(*selected).map(|l| PopupEnterAction::SelectReasoning(l.clone()))
-                }
-                PopupType::Help | PopupType::ModelList { .. }
-                | PopupType::Escalation { .. } | PopupType::ConnectFlow { .. } => {
-                    Some(PopupEnterAction::Dismiss)
-                }
-                PopupType::Settings { .. } => {
-                    Some(PopupEnterAction::StartSettingsEdit)
-                }
+                PopupType::ModelSelector {
+                    models,
+                    selected,
+                    target,
+                    ..
+                } => models
+                    .get(*selected)
+                    .map(|m| PopupEnterAction::SelectModel(m.id.clone(), target.clone())),
+                PopupType::ReasoningSelector { levels, selected } => levels
+                    .get(*selected)
+                    .map(|l| PopupEnterAction::SelectReasoning(l.clone())),
+                PopupType::Help
+                | PopupType::ModelList { .. }
+                | PopupType::Escalation { .. }
+                | PopupType::ConnectFlow { .. } => Some(PopupEnterAction::Dismiss),
+                PopupType::Settings { .. } => Some(PopupEnterAction::StartSettingsEdit),
                 _ => None,
             }
         } else {
@@ -473,7 +493,9 @@ impl App {
     fn handle_input_key(&mut self, key: crossterm::event::KeyEvent) {
         if self.input_bar.has_suggestions() {
             match key.code {
-                KeyCode::Tab | KeyCode::Enter if self.input_bar.has_suggestions() && key.code == KeyCode::Tab => {
+                KeyCode::Tab | KeyCode::Enter
+                    if self.input_bar.has_suggestions() && key.code == KeyCode::Tab =>
+                {
                     self.input_bar.accept_suggestion();
                     return;
                 }
@@ -491,11 +513,10 @@ impl App {
 
         match key.code {
             KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                if self.input_bar.has_suggestions() {
-                    if !self.input_bar.slash_suggestions.is_empty() {
-                        self.input_bar.accept_suggestion();
-                        return;
-                    }
+                if self.input_bar.has_suggestions() && !self.input_bar.slash_suggestions.is_empty()
+                {
+                    self.input_bar.accept_suggestion();
+                    return;
                 }
                 if let Some(text) = self.input_bar.submit() {
                     self.process_input(text);
@@ -569,6 +590,65 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        if self.popup.is_some() {
+            if let Some(ref mut popup) = self.popup {
+                match popup.handle_mouse(&mouse, self.last_frame_area) {
+                    PopupMouseAction::Submit => {
+                        self.handle_popup_enter();
+                    }
+                    PopupMouseAction::Edit => {
+                        if let Some(ref mut popup) = self.popup {
+                            popup.settings_start_edit();
+                        }
+                    }
+                    PopupMouseAction::Close => {
+                        self.popup = None;
+                        self.mode = AppMode::Input;
+                    }
+                    PopupMouseAction::None => {}
+                }
+                return;
+            }
+        }
+
+        let Some(layout) = self.last_layout else {
+            return;
+        };
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if self
+                .input_bar
+                .select_suggestion_at(layout.input, mouse.column, mouse.row)
+            {
+                self.mode = AppMode::Input;
+                return;
+            }
+
+            if rect_contains(layout.messages, mouse.column, mouse.row) {
+                if let Some(index) = self
+                    .message_list
+                    .message_at(mouse.row.saturating_sub(layout.messages.y) as usize)
+                {
+                    self.message_list.toggle_collapse(index);
+                }
+                self.mode = AppMode::Scrolling;
+                return;
+            }
+
+            if rect_contains(layout.input, mouse.column, mouse.row) {
+                self.mode = AppMode::Input;
+                let inner = Rect {
+                    x: layout.input.x.saturating_add(1),
+                    y: layout.input.y.saturating_add(1),
+                    width: layout.input.width.saturating_sub(2),
+                    height: layout.input.height.saturating_sub(2),
+                };
+                self.input_bar
+                    .set_cursor_from_position(inner, mouse.column, mouse.row);
+                return;
+            }
+        }
+
         if event::is_scroll_up(&mouse) {
             self.message_list.scroll_up(3);
             if !matches!(self.mode, AppMode::Popup) {
@@ -581,6 +661,7 @@ impl App {
 
     fn handle_tick(&mut self) {
         self.tick_count += 1;
+        self.message_list.tick_animations();
 
         // Show welcome on first tick so usage data can load
         if !self.welcome_shown && self.tick_count >= 3 {
@@ -610,12 +691,26 @@ impl App {
 
         for event in events {
             match event {
+                AgentEvent::PreparationStart => {
+                    self.status.status = AgentStatus::Preparing;
+                    self.spinner.label = "shizuka...".to_string();
+                }
+                AgentEvent::PreparationResult(summary) => {
+                    self.message_list.add_message(ChatMessage {
+                        msg_type: MessageType::Shizuka,
+                        content: summary,
+                        timestamp: None,
+                        collapsed: true,
+                    });
+                }
                 AgentEvent::ThinkingStart => {
                     self.status.status = AgentStatus::Thinking;
                     self.spinner.label = "thinking...".to_string();
                 }
                 AgentEvent::TextDelta(text) => {
-                    if text.is_empty() { continue; }
+                    if text.is_empty() {
+                        continue;
+                    }
                     if let Some(last) = self.message_list.messages.last() {
                         if matches!(last.msg_type, MessageType::Nano) {
                             self.message_list.append_to_last(&text);
@@ -640,15 +735,29 @@ impl App {
                     self.status.status = AgentStatus::ToolRunning(name.clone());
                     self.spinner.label = format!("{}...", name);
                 }
-                AgentEvent::ToolCallEnd { name, result, success } => {
+                AgentEvent::ToolCallEnd {
+                    name,
+                    result,
+                    success,
+                    metadata,
+                    step,
+                    context_tokens,
+                } => {
                     self.message_list.add_message(ChatMessage {
-                        msg_type: MessageType::ToolResult { name, success },
+                        msg_type: MessageType::ToolResult {
+                            name,
+                            success,
+                            file_path: metadata.file_path,
+                            diff: metadata.diff,
+                            exit_code: metadata.exit_code,
+                            duration_ms: metadata.execution_time_ms,
+                        },
                         content: result,
                         timestamp: None,
-                        collapsed: false,
+                        collapsed: true,
                     });
-                    self.status.step = self.kms.steps.current;
-                    self.status.context_tokens = self.kms.context.total_tokens_estimate;
+                    self.status.step = step;
+                    self.status.context_tokens = context_tokens;
                 }
                 AgentEvent::Warning(msg) => {
                     self.message_list.add_message(ChatMessage {
@@ -662,9 +771,16 @@ impl App {
                     self.popup = Some(Popup::escalation(&summary));
                     self.mode = AppMode::Popup;
                 }
-                AgentEvent::Complete(_) => {
+                AgentEvent::Complete {
+                    final_response: _,
+                    kms,
+                } => {
+                    self.kms = *kms;
                     self.agent_running = false;
                     self.status.status = AgentStatus::Complete;
+                    self.status.classification = Some(self.kms.task.classification.clone());
+                    self.status.step = self.kms.steps.current;
+                    self.status.context_tokens = self.kms.context.total_tokens_estimate;
                     self.persist_session_data();
                 }
                 AgentEvent::Error(msg) => {
@@ -730,22 +846,47 @@ impl App {
 
     fn process_model_events(&mut self) {
         if let Some(ref mut rx) = self.model_rx {
-            if let Ok(models) = rx.try_recv() {
+            if let Ok(result) = rx.try_recv() {
                 let current = match self.model_fetch_target {
-                    ModelTarget::Nano => &self.config.nano_model,
-                    ModelTarget::Shizuka => &self.config.shizuka_model,
+                    ModelTarget::Nano => self.config.nano_model.clone(),
+                    ModelTarget::Shizuka => self.config.shizuka_model.clone(),
                 };
-                let entries: Vec<ModelEntry> = models.iter().map(|m| ModelEntry {
-                    id: m.id.clone(),
-                    name: m.name.clone(),
-                    reasoning: m.reasoning,
-                    context: m.limit.as_ref().map(|l| l.context).unwrap_or(0),
-                    active: m.id == *current,
-                    input_rate: m.input_rate,
-                    output_rate: m.output_rate,
-                    category: categorize_model(&m.id),
-                }).collect();
-                self.popup = Some(Popup::model_selector(entries, current, self.model_fetch_target.clone()));
+
+                self.popup = match result {
+                    Ok(models) => {
+                        let entries: Vec<ModelEntry> = models
+                            .iter()
+                            .map(|m| ModelEntry {
+                                id: m.id.clone(),
+                                name: m.name.clone(),
+                                provider: m.provider.clone(),
+                                release_status: m.release_status.clone(),
+                                reasoning: m.reasoning,
+                                context: m.limit.as_ref().map(|l| l.context).unwrap_or(0),
+                                active: m.id == current,
+                                input_rate: m.input_rate,
+                                output_rate: m.output_rate,
+                                premium_multiplier_paid_display: m
+                                    .premium_multiplier_paid_display
+                                    .clone(),
+                                premium_multiplier_free_display: m
+                                    .premium_multiplier_free_display
+                                    .clone(),
+                                included_in_paid: m.included_in_paid,
+                                category: categorize_model(&m.id),
+                            })
+                            .collect();
+                        Some(Popup::model_selector(
+                            entries,
+                            &current,
+                            self.model_fetch_target.clone(),
+                        ))
+                    }
+                    Err(error) => Some(Popup::model_selector_error(
+                        &error,
+                        self.model_fetch_target.clone(),
+                    )),
+                };
                 self.mode = AppMode::Popup;
                 self.model_rx = None;
             }
@@ -820,7 +961,11 @@ impl App {
                 self.show_settings();
             }
             "/status" => {
-                let auth = if copilot::is_authenticated() { "connected" } else { "not connected" };
+                let auth = if copilot::is_authenticated() {
+                    "connected"
+                } else {
+                    "not connected"
+                };
                 let mut status = format!(
                     "  Session: #{}\n  Nano: {} [{}] reason={}\n  Shizuka: {} [{}]\n  Auth: {}\n  Steps: {}\n  Files modified: {}\n  Pinned: {}",
                     &self.kms.session_id[..8],
@@ -836,8 +981,10 @@ impl App {
                 );
                 if let Some(ref usage) = self.copilot_usage {
                     if usage.limit > 0 {
-                        status.push_str(&format!("\n  Copilot: {:.0}% left ({}/{})",
-                            usage.percent_left, usage.requests_left, usage.limit));
+                        status.push_str(&format!(
+                            "\n  Copilot: {:.0}% left ({}/{})",
+                            usage.percent_left, usage.requests_left, usage.limit
+                        ));
                     }
                 }
                 self.message_list.add_message(ChatMessage {
@@ -901,7 +1048,10 @@ impl App {
                         collapsed: false,
                     });
                 } else {
-                    let list = self.input_bar.pinned_files.iter()
+                    let list = self
+                        .input_bar
+                        .pinned_files
+                        .iter()
                         .map(|f| format!("    @{}", f))
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -914,11 +1064,8 @@ impl App {
                 }
             }
             "/diff" => {
-                let diffs: Vec<String> = self.kms.files.index.iter()
-                    .filter(|(_, info)| info.is_modified)
-                    .map(|(path, _)| format!("    M {}", path))
-                    .collect();
-                if diffs.is_empty() {
+                let diff_report = self.render_session_diff_report();
+                if diff_report.is_empty() {
                     self.message_list.add_message(ChatMessage {
                         msg_type: MessageType::System,
                         content: "  No files modified this session.".to_string(),
@@ -927,8 +1074,15 @@ impl App {
                     });
                 } else {
                     self.message_list.add_message(ChatMessage {
-                        msg_type: MessageType::System,
-                        content: format!("  Modified files:\n{}", diffs.join("\n")),
+                        msg_type: MessageType::ToolResult {
+                            name: "session diff".to_string(),
+                            success: true,
+                            file_path: None,
+                            diff: Some(diff_report.clone()),
+                            exit_code: None,
+                            duration_ms: None,
+                        },
+                        content: diff_report,
                         timestamp: None,
                         collapsed: false,
                     });
@@ -961,16 +1115,22 @@ impl App {
                     msg_type: MessageType::System,
                     content: format!(
                         "  Context: ~{} tokens\n  Steps: {}",
-                        self.kms.context.total_tokens_estimate,
-                        self.kms.steps.current,
+                        self.kms.context.total_tokens_estimate, self.kms.steps.current,
                     ),
                     timestamp: None,
                     collapsed: false,
                 });
             }
             "/export" => {
-                let path = if args.is_empty() { "hakari-chat.txt" } else { args };
-                let content: String = self.message_list.messages.iter()
+                let path = if args.is_empty() {
+                    "hakari-chat.txt"
+                } else {
+                    args
+                };
+                let content: String = self
+                    .message_list
+                    .messages
+                    .iter()
                     .map(|m| m.content.as_str())
                     .collect::<Vec<_>>()
                     .join("\n\n---\n\n");
@@ -1051,10 +1211,12 @@ impl App {
 
         tokio::spawn(async move {
             match copilot::fetch_models().await {
-                Ok(models) => { let _ = tx.send(models); }
+                Ok(models) => {
+                    let _ = tx.send(Ok(models));
+                }
                 Err(e) => {
                     tracing::warn!("Failed to fetch models: {}", e);
-                    let _ = tx.send(Vec::new());
+                    let _ = tx.send(Err(e.to_string()));
                 }
             }
         });
@@ -1079,7 +1241,10 @@ impl App {
             "high".to_string(),
             "xhigh".to_string(),
         ];
-        self.popup = Some(Popup::reasoning_selector(levels, &self.config.nano_reasoning.to_string()));
+        self.popup = Some(Popup::reasoning_selector(
+            levels,
+            &self.config.nano_reasoning.to_string(),
+        ));
         self.mode = AppMode::Popup;
     }
 
@@ -1091,12 +1256,16 @@ impl App {
             model_id: self.config.nano_model.clone(),
             category: self.config.nano_category.to_string(),
             reasoning: self.config.nano_reasoning.to_string(),
+            rate: copilot::model_multiplier_display(&self.config.nano_model)
+                .unwrap_or_else(|| "n/a".to_string()),
         });
         entries.push(ModelListDisplay {
             demand: "Shizuka (prep)".to_string(),
             model_id: self.config.shizuka_model.clone(),
             category: self.config.shizuka_category.to_string(),
             reasoning: "n/a".to_string(),
+            rate: copilot::model_multiplier_display(&self.config.shizuka_model)
+                .unwrap_or_else(|| "n/a".to_string()),
         });
 
         for entry in &self.config.model_list {
@@ -1105,6 +1274,8 @@ impl App {
                 model_id: entry.model_id.clone(),
                 category: entry.category.to_string(),
                 reasoning: entry.reasoning.to_string(),
+                rate: copilot::model_multiplier_display(&entry.model_id)
+                    .unwrap_or_else(|| "n/a".to_string()),
             });
         }
 
@@ -1159,14 +1330,21 @@ impl App {
             SettingEntry {
                 key: "auth".to_string(),
                 label: "GitHub Copilot".to_string(),
-                value: if copilot::is_authenticated() { "Connected".to_string() } else { "Not connected".to_string() },
+                value: if copilot::is_authenticated() {
+                    "Connected".to_string()
+                } else {
+                    "Not connected".to_string()
+                },
                 editable: false,
             },
             SettingEntry {
                 key: "copilot_usage".to_string(),
                 label: "Copilot Usage".to_string(),
                 value: match &self.copilot_usage {
-                    Some(u) if u.limit > 0 => format!("{:.0}% left ({}/{})", u.percent_left, u.requests_left, u.limit),
+                    Some(u) if u.limit > 0 => format!(
+                        "{:.0}% left ({}/{})",
+                        u.percent_left, u.requests_left, u.limit
+                    ),
                     _ => "N/A".to_string(),
                 },
                 editable: false,
@@ -1201,7 +1379,8 @@ impl App {
                 Ok(state) => {
                     let _ = tx.send(ConnectEvent::FlowStarted(state.clone()));
                     loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(state.interval + 2)).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(state.interval + 2))
+                            .await;
                         match copilot::poll_for_token(&state).await {
                             Ok(Some(_)) => {
                                 let _ = tx.send(ConnectEvent::TokenReceived);
@@ -1233,17 +1412,20 @@ impl App {
                 let mut config = (*self.config).clone();
                 config.nano_category = parse_model_category(value);
                 self.config = Arc::new(config);
+                self.persist_config_change();
             }
             "shizuka_category" => {
                 let mut config = (*self.config).clone();
                 config.shizuka_category = parse_model_category(value);
                 self.config = Arc::new(config);
+                self.persist_config_change();
             }
             "max_context" => {
                 if let Ok(n) = value.parse::<usize>() {
                     let mut config = (*self.config).clone();
                     config.max_context_tokens = n;
                     self.config = Arc::new(config);
+                    self.persist_config_change();
                 }
             }
             _ => {}
@@ -1257,6 +1439,7 @@ impl App {
         config.nano_category = parse_model_category(model_id);
         config.nano_reasoning = ReasoningLevel::default_for_model(model_id);
         self.config = Arc::new(config);
+        self.persist_config_change();
         self.rebuild_llm_client();
     }
 
@@ -1265,6 +1448,7 @@ impl App {
         config.shizuka_model = model_id.to_string();
         config.shizuka_category = parse_model_category(model_id);
         self.config = Arc::new(config);
+        self.persist_config_change();
         self.rebuild_llm_client();
     }
 
@@ -1279,6 +1463,19 @@ impl App {
             _ => ReasoningLevel::High,
         };
         self.config = Arc::new(config);
+        self.persist_config_change();
+        self.rebuild_llm_client();
+    }
+
+    fn persist_config_change(&mut self) {
+        if let Err(error) = self.config.save() {
+            self.message_list.add_message(ChatMessage {
+                msg_type: MessageType::Warning,
+                content: format!("  Failed to persist config: {}", error),
+                timestamp: None,
+                collapsed: false,
+            });
+        }
     }
 
     fn rebuild_llm_client(&mut self) {
@@ -1294,7 +1491,10 @@ impl App {
 
     fn do_copy(&mut self) {
         if let Some(ref mut clipboard) = self.clipboard {
-            let text: String = self.message_list.messages.iter()
+            let text: String = self
+                .message_list
+                .messages
+                .iter()
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
@@ -1359,18 +1559,51 @@ impl App {
         let pinned = self.input_bar.pinned_files.clone();
 
         tokio::spawn(async move {
+            let _ = event_tx.send(AgentEvent::PreparationStart);
+
             // Single shizuka request: try fast path first, only call shizuka if needed
             let mut prep = if let Some(fast) = preparation::try_fast_path(&prompt, &project_dir) {
                 fast
             } else {
-                match preparation::run_preparation(&llm_client, &prompt, &kms, &kpms, &kkm, &project_dir).await {
+                match preparation::run_preparation(
+                    &llm_client,
+                    &prompt,
+                    &kms,
+                    &kpms,
+                    &kkm,
+                    &project_dir,
+                )
+                .await
+                {
                     Ok(p) => p,
                     Err(e) => {
-                        let _ = event_tx.send(AgentEvent::Error(format!("Preparation failed: {}", e)));
+                        let _ =
+                            event_tx.send(AgentEvent::Error(format!("Preparation failed: {}", e)));
                         return;
                     }
                 }
             };
+
+            let prep_summary = format!(
+                "classification: {}\nsummary: {}\npreload: {}\nreference: {}{}",
+                prep.task_classification,
+                prep.task_summary,
+                if prep.files_to_preload.is_empty() {
+                    "none".to_string()
+                } else {
+                    prep.files_to_preload.join(", ")
+                },
+                if prep.files_to_reference.is_empty() {
+                    "none".to_string()
+                } else {
+                    prep.files_to_reference.join(", ")
+                },
+                prep.suggested_approach
+                    .as_ref()
+                    .map(|approach| format!("\napproach: {}", approach))
+                    .unwrap_or_default(),
+            );
+            let _ = event_tx.send(AgentEvent::PreparationResult(prep_summary));
 
             for file in &pinned {
                 if !prep.files_to_preload.contains(file) {
@@ -1391,7 +1624,10 @@ impl App {
 
             // Single nano agent run per prompt
             let agent = NanoAgent::new(config, llm_client, project_dir, 0);
-            match agent.run(&prep, &mut kms, &kpms, &kkm, event_tx.clone()).await {
+            match agent
+                .run(&prep, &mut kms, &kpms, &kkm, event_tx.clone())
+                .await
+            {
                 Ok(_) => {}
                 Err(e) => {
                     let _ = event_tx.send(AgentEvent::Error(format!("Agent error: {}", e)));
@@ -1400,16 +1636,61 @@ impl App {
         });
     }
 
+    fn render_session_diff_report(&self) -> String {
+        let mut paths: Vec<String> = self
+            .kms
+            .files
+            .index
+            .iter()
+            .filter(|(_, info)| info.is_modified)
+            .map(|(path, _)| path.clone())
+            .collect();
+        paths.sort();
+
+        let mut sections = Vec::new();
+
+        for path in paths {
+            let current = std::fs::read_to_string(self.project_dir.join(&path)).unwrap_or_default();
+            let original = self
+                .kms
+                .files
+                .backups
+                .get(&path)
+                .cloned()
+                .unwrap_or_default();
+            if current == original {
+                continue;
+            }
+
+            sections.push(
+                TextDiff::from_lines(&original, &current)
+                    .unified_diff()
+                    .context_radius(3)
+                    .header(&format!("a/{}", path), &format!("b/{}", path))
+                    .to_string(),
+            );
+        }
+
+        sections.join("\n")
+    }
+
     fn persist_session_data(&mut self) {
         let prep_files: Vec<String> = Vec::new();
         let misses = improvement::collect_preparation_misses(&self.kms, &prep_files, &[]);
         let record = improvement::collect_iteration_record(&self.kms);
-        improvement::persist_improvements(&mut self.kpms, &self.kms, &misses, &record, &self.kms.session_id);
+        improvement::persist_improvements(
+            &mut self.kpms,
+            &self.kms,
+            &misses,
+            &record,
+            &self.kms.session_id,
+        );
         let _ = self.kpms.save(&self.project_dir);
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        self.last_frame_area = area;
 
         frame.render_widget(
             ratatui::widgets::Block::default().style(Style::default().bg(Theme::bg())),
@@ -1418,6 +1699,7 @@ impl App {
 
         let input_height = self.input_bar.desired_height();
         let layout = AppLayout::compute(area, input_height);
+        self.last_layout = Some(layout);
 
         // Header
         let auth_display = if copilot::is_authenticated() {
@@ -1442,6 +1724,7 @@ impl App {
                 shizuka_model: self.config.shizuka_model.clone(),
                 auth_status: auth_display,
                 copilot_usage: self.copilot_usage.clone(),
+                animation_frame: self.tick_count,
             },
         );
 
@@ -1452,24 +1735,46 @@ impl App {
         self.input_bar.render(frame, layout.input);
 
         // Status bar
+        self.status.modified_files = self
+            .kms
+            .files
+            .index
+            .values()
+            .filter(|info| info.is_modified)
+            .count();
+        self.status.pinned_files = self.input_bar.pinned_files.len();
+        self.status.activity = if self.agent_running {
+            Some(self.spinner.as_string())
+        } else {
+            None
+        };
         status_bar::render_status_bar(frame, layout.status, &self.status);
 
         // Popup overlay
         if let Some(ref popup) = self.popup {
-            popup.render(frame, area);
+            popup.render(frame, area, self.tick_count);
         }
     }
 }
 
 fn categorize_model(model_id: &str) -> String {
     let lower = model_id.to_lowercase();
-    if lower.contains("mini") || lower.contains("lite") || lower.contains("flash") || lower.contains("haiku") {
-        "Light".to_string()
-    } else if lower.contains("nano") || lower.contains("small") {
+    if lower.contains("mini")
+        || lower.contains("lite")
+        || lower.contains("flash")
+        || lower.contains("haiku")
+        || lower.contains("nano")
+        || lower.contains("small")
+    {
         "Light".to_string()
     } else if lower.contains("pro") || lower.contains("medium") {
         "Medium".to_string()
-    } else if lower.contains("max") || lower.contains("opus") || lower.contains("o1") || lower.contains("o3") || lower.contains("o4") {
+    } else if lower.contains("max")
+        || lower.contains("opus")
+        || lower.contains("o1")
+        || lower.contains("o3")
+        || lower.contains("o4")
+    {
         "Max".to_string()
     } else {
         "High".to_string()
@@ -1478,13 +1783,28 @@ fn categorize_model(model_id: &str) -> String {
 
 fn parse_model_category(model_id: &str) -> ModelCategory {
     let lower = model_id.to_lowercase();
-    if lower.contains("mini") || lower.contains("lite") || lower.contains("flash") || lower.contains("haiku") || lower.contains("nano") || lower.contains("small") {
+    if lower.contains("mini")
+        || lower.contains("lite")
+        || lower.contains("flash")
+        || lower.contains("haiku")
+        || lower.contains("nano")
+        || lower.contains("small")
+    {
         ModelCategory::Light
     } else if lower.contains("pro") || lower.contains("medium") {
         ModelCategory::Medium
-    } else if lower.contains("max") || lower.contains("opus") || lower.contains("o1") || lower.contains("o3") || lower.contains("o4") {
+    } else if lower.contains("max")
+        || lower.contains("opus")
+        || lower.contains("o1")
+        || lower.contains("o3")
+        || lower.contains("o4")
+    {
         ModelCategory::Max
     } else {
         ModelCategory::High
     }
+}
+
+fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
 }

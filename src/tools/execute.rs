@@ -12,12 +12,7 @@ const BLOCKED_COMMANDS: &[&str] = &[
     ":(){:|:&};:",
 ];
 
-const CONFIRM_COMMANDS: &[&str] = &[
-    "git push",
-    "git commit",
-    "npm publish",
-    "cargo publish",
-];
+const CONFIRM_COMMANDS: &[&str] = &["git push", "git commit", "npm publish", "cargo publish"];
 
 pub struct ExecuteResult {
     pub tool_result: ToolResult,
@@ -25,11 +20,7 @@ pub struct ExecuteResult {
     pub confirmation_message: Option<String>,
 }
 
-pub fn execute_command(
-    project_dir: &Path,
-    command: &str,
-    kkm: &Kkm,
-) -> ExecuteResult {
+pub fn execute_command(project_dir: &Path, command: &str, kkm: &Kkm) -> ExecuteResult {
     // Safety check
     for blocked in BLOCKED_COMMANDS {
         if command.contains(blocked) {
@@ -121,9 +112,7 @@ pub fn execute_command(
 
 fn determine_timeout(command: &str) -> u64 {
     let cmd_lower = command.to_lowercase();
-    if cmd_lower.contains("build") || cmd_lower.contains("compile") {
-        120
-    } else if cmd_lower.contains("test") {
+    if cmd_lower.contains("build") || cmd_lower.contains("compile") || cmd_lower.contains("test") {
         120
     } else if cmd_lower.starts_with("ls")
         || cmd_lower.starts_with("cat")
@@ -175,10 +164,7 @@ fn format_command_output(
         let head: Vec<&str> = lines[..20].to_vec();
         let tail: Vec<&str> = lines[lines.len() - 50..].to_vec();
         output.push_str(&head.join("\n"));
-        output.push_str(&format!(
-            "\n[... {} lines omitted ...]\n",
-            lines.len() - 70
-        ));
+        output.push_str(&format!("\n[... {} lines omitted ...]\n", lines.len() - 70));
         output.push_str(&tail.join("\n"));
     } else if !combined.trim().is_empty() {
         output.push_str(&combined);
@@ -196,9 +182,12 @@ fn try_parse_test_output(stdout: &str, stderr: &str) -> Option<String> {
         let mut result = String::new();
         for line in combined.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("Tests:") || trimmed.starts_with("Test Suites:")
-                || trimmed.starts_with("PASS") || trimmed.starts_with("FAIL")
-                || trimmed.contains("Expected") || trimmed.contains("Received")
+            if trimmed.starts_with("Tests:")
+                || trimmed.starts_with("Test Suites:")
+                || trimmed.starts_with("PASS")
+                || trimmed.starts_with("FAIL")
+                || trimmed.contains("Expected")
+                || trimmed.contains("Received")
                 || trimmed.starts_with("Coverage:")
             {
                 result.push_str(&format!("  {}\n", trimmed));
@@ -214,8 +203,10 @@ fn try_parse_test_output(stdout: &str, stderr: &str) -> Option<String> {
         let mut result = String::new();
         for line in combined.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("test result:") || trimmed.starts_with("test ")
-                || trimmed.contains("FAILED") || trimmed.contains("failures:")
+            if trimmed.starts_with("test result:")
+                || trimmed.starts_with("test ")
+                || trimmed.contains("FAILED")
+                || trimmed.contains("failures:")
             {
                 result.push_str(&format!("  {}\n", trimmed));
             }
@@ -230,9 +221,12 @@ fn try_parse_test_output(stdout: &str, stderr: &str) -> Option<String> {
         let mut result = String::new();
         for line in combined.lines() {
             let trimmed = line.trim();
-            if trimmed.contains("passed") || trimmed.contains("failed")
-                || trimmed.contains("error") || trimmed.starts_with("FAILED")
-                || trimmed.starts_with("E ") || trimmed.starts_with(">")
+            if trimmed.contains("passed")
+                || trimmed.contains("failed")
+                || trimmed.contains("error")
+                || trimmed.starts_with("FAILED")
+                || trimmed.starts_with("E ")
+                || trimmed.starts_with(">")
             {
                 result.push_str(&format!("  {}\n", trimmed));
             }

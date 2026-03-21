@@ -31,6 +31,7 @@ impl SwarmManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_sub_agent(
         &mut self,
         task: &str,
@@ -47,7 +48,9 @@ impl SwarmManager {
         };
 
         // Validate
-        if let Err(e) = summon::validate_summon(&request, parent_kms, parent_depth, self.active_agents) {
+        if let Err(e) =
+            summon::validate_summon(&request, parent_kms, parent_depth, self.active_agents)
+        {
             return Ok(summon::SummonResult {
                 tool_result: crate::tools::ToolResult {
                     success: false,
@@ -89,27 +92,27 @@ impl SwarmManager {
             parent_depth + 1,
         );
 
-        let result = sub_agent.run(&sub_prep, &mut sub_kms, kpms, kkm, event_tx).await;
+        let result = sub_agent
+            .run(&sub_prep, &mut sub_kms, kpms, kkm, event_tx)
+            .await;
 
         // Release locks
         summon::release_file_locks(parent_kms, &files);
         self.active_agents -= 1;
 
         // Collect modified files
-        let modified_files: Vec<String> = sub_kms.files.index.iter()
+        let modified_files: Vec<String> = sub_kms
+            .files
+            .index
+            .iter()
             .filter(|(_, info)| info.is_modified)
             .map(|(path, _)| path.clone())
             .collect();
 
         match result {
             Ok(response) => {
-                let output = summon::format_summon_result(
-                    task,
-                    &modified_files,
-                    &response,
-                    true,
-                    "",
-                );
+                let output =
+                    summon::format_summon_result(task, &modified_files, &response, true, "");
                 Ok(summon::SummonResult {
                     tool_result: crate::tools::ToolResult {
                         success: true,
@@ -119,16 +122,14 @@ impl SwarmManager {
                     modified_files,
                 })
             }
-            Err(e) => {
-                Ok(summon::SummonResult {
-                    tool_result: crate::tools::ToolResult {
-                        success: false,
-                        output: format!("Sub-agent failed: {}", e),
-                        metadata: crate::tools::ToolResultMetadata::default(),
-                    },
-                    modified_files,
-                })
-            }
+            Err(e) => Ok(summon::SummonResult {
+                tool_result: crate::tools::ToolResult {
+                    success: false,
+                    output: format!("Sub-agent failed: {}", e),
+                    metadata: crate::tools::ToolResultMetadata::default(),
+                },
+                modified_files,
+            }),
         }
     }
 }

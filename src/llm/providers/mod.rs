@@ -1,5 +1,5 @@
-pub mod openai;
 pub mod anthropic;
+pub mod openai;
 
 use super::messages::{Message, ToolCall};
 use tokio::sync::mpsc;
