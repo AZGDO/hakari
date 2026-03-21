@@ -1,5 +1,4 @@
 pub mod anthropic;
-pub mod gemini;
 pub mod openai;
 
 use super::messages::{Message, ToolCall};
@@ -18,7 +17,6 @@ pub enum StreamEvent {
 pub enum Provider {
     OpenAI(openai::OpenAiProvider),
     Anthropic(anthropic::AnthropicProvider),
-    Gemini(gemini::GeminiProvider),
 }
 
 impl Provider {
@@ -31,7 +29,6 @@ impl Provider {
         match self {
             Provider::OpenAI(p) => p.chat(messages, tools, stream_tx).await,
             Provider::Anthropic(p) => p.chat(messages, tools, stream_tx).await,
-            Provider::Gemini(p) => p.chat(messages, tools, stream_tx).await,
         }
     }
 }

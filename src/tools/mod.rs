@@ -2,7 +2,6 @@ pub mod execute;
 pub mod grep;
 pub mod read;
 pub mod summon;
-pub mod web_search;
 pub mod write;
 
 use serde::{Deserialize, Serialize};

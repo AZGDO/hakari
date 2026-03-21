@@ -39,21 +39,10 @@ pub enum PopupType {
         levels: Vec<String>,
         selected: usize,
     },
-    ProviderSelector {
-        providers: Vec<String>,
-        selected: usize,
-        target: ProviderTarget,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelTarget {
-    Nano,
-    Shizuka,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ProviderTarget {
     Nano,
     Shizuka,
 }
@@ -235,22 +224,6 @@ impl Popup {
         }
     }
 
-    pub fn provider_selector(
-        providers: Vec<String>,
-        current: &str,
-        target: ProviderTarget,
-    ) -> Self {
-        let selected = providers.iter().position(|p| p == current).unwrap_or(0);
-        Self {
-            popup_type: PopupType::ProviderSelector {
-                providers,
-                selected,
-                target,
-            },
-            visible: true,
-        }
-    }
-
     pub fn select_up(&mut self) {
         match &mut self.popup_type {
             PopupType::ModelSelector {
@@ -278,9 +251,6 @@ impl Popup {
                 *selected = selected.saturating_sub(1);
             }
             PopupType::ReasoningSelector { selected, .. } => {
-                *selected = selected.saturating_sub(1);
-            }
-            PopupType::ProviderSelector { selected, .. } => {
                 *selected = selected.saturating_sub(1);
             }
             _ => {}
@@ -321,13 +291,6 @@ impl Popup {
             }
             PopupType::ReasoningSelector { selected, levels } => {
                 *selected = (*selected + 1).min(levels.len().saturating_sub(1));
-            }
-            PopupType::ProviderSelector {
-                selected,
-                providers,
-                ..
-            } => {
-                *selected = (*selected + 1).min(providers.len().saturating_sub(1));
             }
             _ => {}
         }
@@ -465,13 +428,6 @@ impl Popup {
             PopupType::ReasoningSelector { levels, selected } => {
                 self.render_reasoning_selector(frame, area, levels, *selected);
             }
-            PopupType::ProviderSelector {
-                providers,
-                selected,
-                ..
-            } => {
-                self.render_provider_selector(frame, area, providers, *selected);
-            }
         }
     }
 
@@ -586,8 +542,7 @@ impl Popup {
             PopupType::Help
             | PopupType::Escalation { .. }
             | PopupType::ConnectFlow { .. }
-            | PopupType::Confirmation { .. }
-            | PopupType::ProviderSelector { .. } => PopupMouseAction::Close,
+            | PopupType::Confirmation { .. } => PopupMouseAction::Close,
         }
     }
 
@@ -1254,83 +1209,6 @@ impl Popup {
                         } else {
                             Modifier::empty()
                         }),
-                ),
-            ]));
-        }
-
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            "  Enter select, Esc cancel",
-            Style::default().fg(Theme::text_muted()),
-        )));
-
-        let paragraph = Paragraph::new(lines);
-        frame.render_widget(paragraph, inner);
-    }
-
-    fn render_provider_selector(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        providers: &[String],
-        selected: usize,
-    ) {
-        let popup_area = centered_rect(44, 30, area);
-        frame.render_widget(Clear, popup_area);
-        let block = Block::default()
-            .title(" Select Provider ")
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Theme::border_focus()))
-            .style(Style::default().bg(Theme::surface()));
-
-        let inner = block.inner(popup_area);
-        frame.render_widget(block, popup_area);
-
-        let provider_descs = [
-            ("OpenAI / Copilot", "OpenAI API or GitHub Copilot"),
-            ("Anthropic", "Claude models via Anthropic API"),
-            ("Google Gemini", "Gemini models via Google AI Studio"),
-        ];
-
-        let mut lines = Vec::new();
-        lines.push(Line::default());
-
-        for (i, prov) in providers.iter().enumerate() {
-            let is_sel = i == selected;
-            let bg = if is_sel {
-                Theme::surface_bright()
-            } else {
-                Theme::surface()
-            };
-            let desc = provider_descs
-                .iter()
-                .find(|(n, _)| *n == prov.as_str())
-                .map(|(_, d)| *d)
-                .unwrap_or("");
-            lines.push(Line::from(vec![
-                Span::styled(
-                    if is_sel { "  \u{25b8} " } else { "    " },
-                    Style::default().fg(Theme::mauve()).bg(bg),
-                ),
-                Span::styled(
-                    format!("{:<22}", prov),
-                    Style::default()
-                        .fg(if is_sel {
-                            Theme::text_bright()
-                        } else {
-                            Theme::text()
-                        })
-                        .bg(bg)
-                        .add_modifier(if is_sel {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
-                Span::styled(
-                    desc.to_string(),
-                    Style::default().fg(Theme::text_muted()).bg(bg),
                 ),
             ]));
         }

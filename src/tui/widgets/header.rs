@@ -3,8 +3,6 @@ use crate::tui::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-const ASCII_WORDMARK: &str = "██╗  ██╗ █████╗ ██╗  ██╗ █████╗ ██████╗ ██╗";
-
 pub struct HeaderData {
     pub project_name: String,
     pub session_id: String,
@@ -33,11 +31,11 @@ pub fn render_header(frame: &mut Frame, area: Rect, data: &HeaderData) {
     let mut line1_spans = Vec::new();
 
     line1_spans.push(Span::styled(
-        format!(" {} ", ASCII_WORDMARK),
+        " HAKARI ",
         Style::default()
             .fg(Theme::mauve())
             .bg(bg)
-            .add_modifier(Modifier::BOLD),
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC),
     ));
 
     line1_spans.push(Span::styled(

@@ -98,10 +98,8 @@ pub struct HakariConfig {
     pub shizuka_category: ModelCategory,
     pub openai_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
-    pub gemini_api_key: Option<String>,
     pub openai_base_url: String,
     pub anthropic_base_url: String,
-    pub gemini_base_url: String,
     pub max_context_tokens: usize,
     pub iteration_budgets: IterationBudgets,
     pub model_list: Vec<ModelListEntry>,
@@ -114,23 +112,6 @@ pub struct HakariConfig {
 pub enum LlmProvider {
     OpenAI,
     Anthropic,
-    Gemini,
-}
-
-impl std::fmt::Display for LlmProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::OpenAI => write!(f, "OpenAI / Copilot"),
-            Self::Anthropic => write!(f, "Anthropic"),
-            Self::Gemini => write!(f, "Google Gemini"),
-        }
-    }
-}
-
-impl LlmProvider {
-    pub fn all() -> &'static [Self] {
-        &[Self::OpenAI, Self::Anthropic, Self::Gemini]
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,10 +161,8 @@ impl Default for HakariConfig {
             shizuka_category: ModelCategory::Light,
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
-            gemini_api_key: std::env::var("GEMINI_API_KEY").ok(),
             openai_base_url: "https://api.openai.com/v1".to_string(),
             anthropic_base_url: "https://api.anthropic.com".to_string(),
-            gemini_base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
             max_context_tokens: 128_000,
             iteration_budgets: IterationBudgets::default(),
             model_list: Vec::new(),
@@ -212,9 +191,6 @@ impl HakariConfig {
             }
             if config.anthropic_api_key.is_none() {
                 config.anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-            }
-            if config.gemini_api_key.is_none() {
-                config.gemini_api_key = std::env::var("GEMINI_API_KEY").ok();
             }
             Ok(config)
         } else {
@@ -248,10 +224,6 @@ impl HakariConfig {
             .map(|v| v.to_string());
         persisted.anthropic_api_key = existing_secret_keys
             .get("anthropic_api_key")
-            .and_then(|v| v.as_str())
-            .map(|v| v.to_string());
-        persisted.gemini_api_key = existing_secret_keys
-            .get("gemini_api_key")
             .and_then(|v| v.as_str())
             .map(|v| v.to_string());
 
