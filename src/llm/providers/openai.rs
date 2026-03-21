@@ -10,6 +10,7 @@ pub struct OpenAiProvider {
     base_url: String,
     model: String,
     is_copilot: bool,
+    uses_responses_api: bool,
     reasoning_effort: Option<String>,
 }
 
@@ -21,12 +22,14 @@ impl OpenAiProvider {
         reasoning_effort: Option<String>,
     ) -> Self {
         let is_copilot = base_url.contains("githubcopilot.com");
+        let uses_responses_api = is_copilot && requires_responses_api(&model);
         Self {
             client: Client::new(),
             api_key,
             base_url,
             model,
             is_copilot,
+            uses_responses_api,
             reasoning_effort,
         }
     }
@@ -71,6 +74,9 @@ impl OpenAiProvider {
         tools: &[Value],
         stream_tx: Option<mpsc::UnboundedSender<StreamEvent>>,
     ) -> anyhow::Result<(String, Vec<ToolCall>)> {
+        if self.uses_responses_api {
+            return self.chat_via_responses(messages, tools, stream_tx).await;
+        }
         let converted_messages = self.convert_messages(messages);
 
         let mut body = json!({
@@ -83,7 +89,7 @@ impl OpenAiProvider {
             body["tools"] = json!(tools);
         }
 
-        if !self.is_copilot && supports_reasoning_effort(&self.model) {
+        if supports_reasoning_effort(&self.model) {
             if let Some(reasoning_effort) = &self.reasoning_effort {
                 body["reasoning_effort"] = json!(reasoning_effort);
             }
@@ -250,6 +256,73 @@ impl OpenAiProvider {
         }
     }
 
+    async fn chat_via_responses(
+        &self,
+        messages: &[Message],
+        tools: &[Value],
+        stream_tx: Option<mpsc::UnboundedSender<StreamEvent>>,
+    ) -> anyhow::Result<(String, Vec<ToolCall>)> {
+        let input = convert_messages_to_responses_input(messages);
+
+        let responses_tools: Vec<Value> = tools
+            .iter()
+            .filter_map(|t| {
+                let func = t.get("function")?;
+                Some(json!({
+                    "type": "function",
+                    "name": func["name"],
+                    "description": func["description"],
+                    "parameters": func["parameters"],
+                }))
+            })
+            .collect();
+
+        let mut body = json!({
+            "model": self.model,
+            "input": input,
+        });
+
+        if !responses_tools.is_empty() {
+            body["tools"] = json!(responses_tools);
+        }
+
+        let request = self
+            .client
+            .post(format!("{}/responses", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .header("Copilot-Integration-Id", "vscode-chat")
+            .header("Editor-Version", "vscode/1.99.0")
+            .header("Editor-Plugin-Version", "copilot-chat/0.1.85")
+            .header("User-Agent", "hakari/0.1.0");
+
+        let response = request.json(&body).send().await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Responses API error {}: {}", status, error_body);
+        }
+
+        let resp: Value = response.json().await?;
+        let (text, tool_calls) = parse_responses_response(&resp);
+
+        if let Some(tx) = stream_tx {
+            if !text.is_empty() {
+                let _ = tx.send(StreamEvent::TextDelta(text.clone()));
+            }
+            for tc in &tool_calls {
+                let _ = tx.send(StreamEvent::ToolCallStart {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                });
+                let _ = tx.send(StreamEvent::ToolCallEnd);
+            }
+            let _ = tx.send(StreamEvent::Done);
+        }
+
+        Ok((text, tool_calls))
+    }
+
     async fn chat_without_stream(
         &self,
         messages: &[Message],
@@ -267,7 +340,7 @@ impl OpenAiProvider {
             body["tools"] = json!(tools);
         }
 
-        if !self.is_copilot && supports_reasoning_effort(&self.model) {
+        if supports_reasoning_effort(&self.model) {
             if let Some(reasoning_effort) = &self.reasoning_effort {
                 body["reasoning_effort"] = json!(reasoning_effort);
             }
@@ -297,6 +370,100 @@ impl OpenAiProvider {
         let response_body: Value = response.json().await?;
         Ok(parse_non_stream_response(&response_body))
     }
+}
+
+fn requires_responses_api(model: &str) -> bool {
+    let lower = model.to_lowercase();
+    // gpt-5.4 and future models that only support /responses
+    lower.starts_with("gpt-5.") && !lower.starts_with("gpt-5-")
+}
+
+fn convert_messages_to_responses_input(messages: &[Message]) -> Vec<Value> {
+    let mut input: Vec<Value> = Vec::new();
+
+    for msg in messages {
+        match msg.role {
+            Role::System => {
+                // system messages become instructions-style user items in responses API
+                input.push(json!({
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": msg.content.to_text_string()}]
+                }));
+            }
+            Role::User => {
+                input.push(json!({
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": msg.content.to_text_string()}]
+                }));
+            }
+            Role::Assistant => {
+                if let Some(tool_calls) = &msg.tool_calls {
+                    for tc in tool_calls {
+                        input.push(json!({
+                            "type": "function_call",
+                            "call_id": tc.id,
+                            "name": tc.name,
+                            "arguments": tc.arguments.to_string(),
+                        }));
+                    }
+                } else {
+                    let text = msg.content.to_text_string();
+                    if !text.is_empty() {
+                        input.push(json!({
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": text}]
+                        }));
+                    }
+                }
+            }
+            Role::Tool => {
+                if let Some(call_id) = &msg.tool_call_id {
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": msg.content.to_text_string(),
+                    }));
+                }
+            }
+        }
+    }
+
+    input
+}
+
+fn parse_responses_response(resp: &Value) -> (String, Vec<ToolCall>) {
+    let mut text = String::new();
+    let mut tool_calls = Vec::new();
+
+    if let Some(output) = resp["output"].as_array() {
+        for item in output {
+            match item["type"].as_str() {
+                Some("message") => {
+                    if let Some(content) = item["content"].as_array() {
+                        for block in content {
+                            if let Some(t) = block["text"].as_str() {
+                                text.push_str(t);
+                            }
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    let call_id = item["call_id"].as_str().unwrap_or("").to_string();
+                    let name = item["name"].as_str().unwrap_or("").to_string();
+                    let args_str = item["arguments"].as_str().unwrap_or("{}");
+                    let arguments: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
+                    tool_calls.push(ToolCall {
+                        id: call_id,
+                        name,
+                        arguments,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (text, tool_calls)
 }
 
 fn supports_reasoning_effort(model: &str) -> bool {

@@ -111,105 +111,80 @@ impl NanoAgent {
 
         let mut final_response = String::new();
 
-        loop {
-            let _ = event_tx.send(AgentEvent::ThinkingStart);
+        let _ = event_tx.send(AgentEvent::ThinkingStart);
 
-            // Check escalation
-            let escalation_action = escalation.evaluate(kms, max_tool_calls);
-            match escalation_action {
-                EscalationAction::Continue => {}
-                EscalationAction::SoftRedirection { message } => {
-                    history.add(Message::user(&format!("[System note] {}", message)));
-                    let _ = event_tx.send(AgentEvent::Warning(message));
+        // Apply context evictions before sending
+        interceptor
+            .context_controller
+            .apply_evictions(&mut history, kms);
+
+        // Single nano request — stream response
+        let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
+
+        let messages_clone: Vec<Message> = history.messages.clone();
+        let tools_clone = tools.clone();
+        let llm = self.llm_client.clone();
+
+        let llm_task = tokio::spawn(async move {
+            llm.nano_chat(&messages_clone, &tools_clone, Some(stream_tx))
+                .await
+        });
+
+        // Forward stream events (text only — skip argument delta noise)
+        let event_tx_clone = event_tx.clone();
+        while let Some(event) = stream_rx.recv().await {
+            match &event {
+                StreamEvent::TextDelta(text) => {
+                    let _ = event_tx_clone.send(AgentEvent::TextDelta(text.clone()));
                 }
-                EscalationAction::HardConstraint { message, .. } => {
-                    history.add(Message::user(&format!("[System note] {}", message)));
-                    let _ = event_tx.send(AgentEvent::Warning(message));
+                StreamEvent::ToolCallStart { id, name } => {
+                    let _ = event_tx_clone.send(AgentEvent::ToolCallStart {
+                        name: name.clone(),
+                        id: id.clone(),
+                    });
                 }
-                EscalationAction::HardStop { message } => {
-                    history.add(Message::user(&format!("[System note] {}", message)));
-                    let _ = event_tx.send(AgentEvent::Escalation(message));
+                StreamEvent::Done => break,
+                StreamEvent::Error(e) => {
+                    let _ = event_tx_clone.send(AgentEvent::Error(e.clone()));
                     break;
                 }
-                EscalationAction::UserEscalation { summary } => {
-                    let _ = event_tx.send(AgentEvent::Escalation(summary.clone()));
-                    final_response = summary;
-                    break;
-                }
+                _ => {}
             }
+        }
 
-            // Apply context evictions before sending
-            interceptor
-                .context_controller
-                .apply_evictions(&mut history, kms);
+        let (text, tool_calls) = llm_task.await??;
 
-            // Stream from LLM
-            let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
-
-            let messages_clone: Vec<Message> = history.messages.clone();
-            let tools_clone = tools.clone();
-            let llm = self.llm_client.clone();
-
-            let llm_task = tokio::spawn(async move {
-                llm.nano_chat(&messages_clone, &tools_clone, Some(stream_tx))
-                    .await
+        if tool_calls.is_empty() {
+            final_response = text.clone();
+            history.add(Message::assistant(&text));
+            let _ = event_tx.send(AgentEvent::Complete {
+                final_response: text,
+                kms: Box::new(kms.clone()),
             });
-
-            // Forward stream events
-            let event_tx_clone = event_tx.clone();
-            while let Some(event) = stream_rx.recv().await {
-                match &event {
-                    StreamEvent::TextDelta(text) => {
-                        let _ = event_tx_clone.send(AgentEvent::TextDelta(text.clone()));
-                    }
-                    StreamEvent::ToolCallStart { id, name } => {
-                        let _ = event_tx_clone.send(AgentEvent::ToolCallStart {
-                            name: name.clone(),
-                            id: id.clone(),
-                        });
-                        let _ = event_tx_clone.send(AgentEvent::Trace(format!(
-                            "ToolCallStart: {} ({})",
-                            name, id
-                        )));
-                    }
-                    StreamEvent::ToolCallArgumentsDelta(args) => {
-                        let _ = event_tx_clone.send(AgentEvent::Trace(format!(
-                            "ToolCallArgumentsDelta: {}",
-                            args
-                        )));
-                    }
-                    StreamEvent::ToolCallEnd => {
-                        let _ = event_tx_clone.send(AgentEvent::Trace("ToolCallEnd".to_string()));
-                    }
-                    StreamEvent::Done => break,
-                    StreamEvent::Error(e) => {
-                        let _ = event_tx_clone.send(AgentEvent::Error(e.clone()));
-                        break;
-                    }
-                }
-            }
-
-            let (text, tool_calls) = llm_task.await??;
-
-            if tool_calls.is_empty() {
-                // No tool calls = task complete
-                final_response = text.clone();
-                history.add(Message::assistant(&text));
-                let _ = event_tx.send(AgentEvent::Complete {
-                    final_response: text,
-                    kms: Box::new(kms.clone()),
-                });
-                break;
-            }
-
-            // Add assistant message with tool calls
+        } else {
             history.add(Message::assistant_with_tool_calls(
                 &text,
                 tool_calls.clone(),
             ));
 
-            // Execute each tool call through interceptor
+            // Execute all tool calls (in order)
             for tc in &tool_calls {
+                // Check escalation per tool call
+                let escalation_action = escalation.evaluate(kms, max_tool_calls);
+                match escalation_action {
+                    EscalationAction::HardStop { message }
+                    | EscalationAction::UserEscalation { summary: message } => {
+                        let _ = event_tx.send(AgentEvent::Escalation(message.clone()));
+                        final_response = message;
+                        break;
+                    }
+                    EscalationAction::SoftRedirection { message }
+                    | EscalationAction::HardConstraint { message, .. } => {
+                        let _ = event_tx.send(AgentEvent::Warning(message));
+                    }
+                    EscalationAction::Continue => {}
+                }
+
                 let intercept_result = {
                     let (tool_stream_tx, mut tool_stream_rx) = mpsc::unbounded_channel::<String>();
                     let intercept_fut = interceptor.intercept_tool_call(
@@ -245,10 +220,10 @@ impl NanoAgent {
                         }
                     }
                 };
+
                 let step = kms.steps.current;
                 let context_tokens = kms.context.total_tokens_estimate;
 
-                // Send warnings
                 for warning in &intercept_result.injected_warnings {
                     let _ = event_tx.send(AgentEvent::Warning(warning.clone()));
                 }
@@ -262,7 +237,6 @@ impl NanoAgent {
                     context_tokens,
                 });
 
-                // Handle confirmation needed
                 if intercept_result.needs_confirmation {
                     let confirm_msg = intercept_result.confirmation_message.unwrap_or_default();
                     let _ = event_tx.send(AgentEvent::Warning(format!(
@@ -276,17 +250,13 @@ impl NanoAgent {
                     continue;
                 }
 
-                // Add tool result to history
                 let mut result_text = intercept_result.tool_result.output.clone();
-
-                // Append any warnings
                 for warning in &intercept_result.injected_warnings {
                     result_text.push_str(&format!("\n[Warning] {}", warning));
                 }
 
                 history.add(Message::tool_result(&tc.id, &result_text));
 
-                // Record errors
                 if !intercept_result.tool_result.success {
                     kms.record_error(
                         intercept_result.tool_result.metadata.file_path.as_deref(),
@@ -294,6 +264,11 @@ impl NanoAgent {
                     );
                 }
             }
+
+            let _ = event_tx.send(AgentEvent::Complete {
+                final_response: final_response.clone(),
+                kms: Box::new(kms.clone()),
+            });
         }
 
         Ok(final_response)

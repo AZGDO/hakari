@@ -17,7 +17,7 @@ use crate::tui::widgets::input_bar::InputBar;
 use crate::tui::widgets::message_list::{ChatMessage, MessageList, MessageType};
 use crate::tui::widgets::popup::{
     ConnectState, ModelEntry, ModelListDisplay, ModelTarget, Popup, PopupMouseAction, PopupType,
-    SettingEntry,
+    ProviderTarget, SettingEntry,
 };
 use crate::tui::widgets::progress::Spinner;
 use crate::tui::widgets::status_bar::{self, AgentStatus, StatusBarData};
@@ -39,6 +39,7 @@ pub enum AppMode {
 enum PopupEnterAction {
     SelectModel(String, ModelTarget),
     SelectReasoning(String),
+    SelectProvider(String, ProviderTarget),
     StartSettingsEdit,
     Dismiss,
 }
@@ -429,6 +430,13 @@ impl App {
                 PopupType::ReasoningSelector { levels, selected } => levels
                     .get(*selected)
                     .map(|l| PopupEnterAction::SelectReasoning(l.clone())),
+                PopupType::ProviderSelector {
+                    providers,
+                    selected,
+                    target,
+                } => providers
+                    .get(*selected)
+                    .map(|p| PopupEnterAction::SelectProvider(p.clone(), target.clone())),
                 PopupType::Help
                 | PopupType::ModelList { .. }
                 | PopupType::Escalation { .. }
@@ -476,9 +484,38 @@ impl App {
                 self.popup = None;
                 self.mode = AppMode::Input;
             }
+            Some(PopupEnterAction::SelectProvider(provider_name, target)) => {
+                self.set_provider(&provider_name, target);
+                self.popup = None;
+                self.mode = AppMode::Input;
+            }
             Some(PopupEnterAction::StartSettingsEdit) => {
-                if let Some(ref mut popup) = self.popup {
-                    popup.settings_start_edit();
+                // For provider keys, open the provider selector popup instead of text edit
+                let provider_key = if let Some(ref popup) = self.popup {
+                    if let PopupType::Settings {
+                        entries, selected, ..
+                    } = &popup.popup_type
+                    {
+                        entries.get(*selected).map(|e| e.key.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                match provider_key.as_deref() {
+                    Some("nano_provider") => {
+                        self.show_provider_selector(ProviderTarget::Nano);
+                    }
+                    Some("shizuka_provider") => {
+                        self.show_provider_selector(ProviderTarget::Shizuka);
+                    }
+                    _ => {
+                        if let Some(ref mut popup) = self.popup {
+                            popup.settings_start_edit();
+                        }
+                    }
                 }
             }
             Some(PopupEnterAction::Dismiss) => {
@@ -557,6 +594,9 @@ impl App {
             }
             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.input_bar.delete_word_before();
+            }
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.show_last_error_in_chat();
             }
             KeyCode::Char(c) => {
                 self.input_bar.insert_char(c);
@@ -1307,6 +1347,12 @@ impl App {
     fn show_settings(&mut self) {
         let entries = vec![
             SettingEntry {
+                key: "nano_provider".to_string(),
+                label: "Nano Provider".to_string(),
+                value: self.config.nano_provider.to_string(),
+                editable: true,
+            },
+            SettingEntry {
                 key: "nano_model".to_string(),
                 label: "Nano Model".to_string(),
                 value: self.config.nano_model.clone(),
@@ -1325,6 +1371,12 @@ impl App {
                 editable: true,
             },
             SettingEntry {
+                key: "shizuka_provider".to_string(),
+                label: "Shizuka Provider".to_string(),
+                value: self.config.shizuka_provider.to_string(),
+                editable: true,
+            },
+            SettingEntry {
                 key: "shizuka_model".to_string(),
                 label: "Shizuka Model".to_string(),
                 value: self.config.shizuka_model.clone(),
@@ -1337,9 +1389,13 @@ impl App {
                 editable: true,
             },
             SettingEntry {
-                key: "nano_provider".to_string(),
-                label: "Nano Provider".to_string(),
-                value: format!("{:?}", self.config.nano_provider),
+                key: "gemini_api_key".to_string(),
+                label: "Gemini API Key".to_string(),
+                value: if self.config.gemini_api_key.is_some() {
+                    "••••••••".to_string()
+                } else {
+                    "(not set)".to_string()
+                },
                 editable: true,
             },
             SettingEntry {
@@ -1429,6 +1485,37 @@ impl App {
             "nano_model" => self.set_model(value),
             "nano_reasoning" => self.set_reasoning(value),
             "shizuka_model" => self.set_shizuka_model(value),
+            "gemini_api_key" => {
+                let mut config = (*self.config).clone();
+                let path = config
+                    .config_path
+                    .clone()
+                    .unwrap_or_else(crate::config::HakariConfig::default_path);
+                // Persist the key directly into the JSON file
+                let mut json_obj = if path.exists() {
+                    std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                        .unwrap_or_else(|| serde_json::json!({}))
+                } else {
+                    serde_json::json!({})
+                };
+                json_obj["gemini_api_key"] = serde_json::Value::String(value.to_string());
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Ok(content) = serde_json::to_string_pretty(&json_obj) {
+                    let _ = std::fs::write(&path, content);
+                }
+                config.gemini_api_key = Some(value.to_string());
+                self.config = Arc::new(config);
+                self.message_list.add_message(ChatMessage {
+                    msg_type: MessageType::System,
+                    content: "  Gemini API key saved.".to_string(),
+                    timestamp: None,
+                    collapsed: false,
+                });
+            }
             "nano_category" => {
                 let mut config = (*self.config).clone();
                 config.nano_category = parse_model_category(value);
@@ -1486,6 +1573,73 @@ impl App {
         self.config = Arc::new(config);
         self.persist_config_change();
         self.rebuild_llm_client();
+    }
+
+    fn set_provider(&mut self, provider_name: &str, target: ProviderTarget) {
+        use crate::config::LlmProvider;
+        let provider = match provider_name {
+            "Anthropic" => LlmProvider::Anthropic,
+            "Google Gemini" => LlmProvider::Gemini,
+            _ => LlmProvider::OpenAI,
+        };
+        let mut config = (*self.config).clone();
+        match target {
+            ProviderTarget::Nano => {
+                config.nano_provider = provider.clone();
+            }
+            ProviderTarget::Shizuka => {
+                config.shizuka_provider = provider.clone();
+            }
+        }
+        self.config = Arc::new(config);
+        self.persist_config_change();
+        self.rebuild_llm_client();
+        self.message_list.add_message(ChatMessage {
+            msg_type: MessageType::System,
+            content: format!(
+                "  {} provider set to: {}",
+                match target {
+                    ProviderTarget::Nano => "Nano",
+                    ProviderTarget::Shizuka => "Shizuka",
+                },
+                provider_name
+            ),
+            timestamp: None,
+            collapsed: false,
+        });
+    }
+
+    fn show_provider_selector(&mut self, target: ProviderTarget) {
+        use crate::config::LlmProvider;
+        let providers: Vec<String> = LlmProvider::all().iter().map(|p| p.to_string()).collect();
+        let current = match &target {
+            ProviderTarget::Nano => self.config.nano_provider.to_string(),
+            ProviderTarget::Shizuka => self.config.shizuka_provider.to_string(),
+        };
+        self.popup = Some(Popup::provider_selector(providers, &current, target));
+        self.mode = AppMode::Popup;
+    }
+
+    fn show_last_error_in_chat(&mut self) {
+        // Expand the most recent Error message, or surface the last agent error
+        let last_error_idx = self
+            .message_list
+            .messages
+            .iter()
+            .rposition(|m| matches!(m.msg_type, MessageType::Error));
+
+        if let Some(idx) = last_error_idx {
+            // Uncollapse it and scroll to it
+            self.message_list.messages[idx].collapsed = false;
+            self.message_list.scroll_to_bottom();
+        } else {
+            self.message_list.add_message(ChatMessage {
+                msg_type: MessageType::System,
+                content: "  No errors in current session.".to_string(),
+                timestamp: None,
+                collapsed: false,
+            });
+        }
     }
 
     fn persist_config_change(&mut self) {

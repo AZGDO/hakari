@@ -1,5 +1,6 @@
 use super::messages::{Message, ToolCall};
 use super::providers::anthropic::AnthropicProvider;
+use super::providers::gemini::GeminiProvider;
 use super::providers::openai::OpenAiProvider;
 use super::providers::{Provider, StreamEvent};
 use crate::config::{HakariConfig, LlmProvider as LlmProviderConfig};
@@ -14,30 +15,40 @@ impl LlmClient {
     pub fn new(config: &HakariConfig) -> anyhow::Result<Self> {
         let nano_reasoning = reasoning_effort(&config.nano_reasoning.to_string());
 
-        let nano_provider = match config.nano_provider {
-            LlmProviderConfig::OpenAI => {
-                let api_key = config
-                    .openai_api_key
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("OPENAI_API_KEY not set for Nano provider"))?;
-                Provider::OpenAI(OpenAiProvider::new(
-                    api_key,
-                    config.openai_base_url.clone(),
-                    config.nano_model.clone(),
-                    nano_reasoning,
-                ))
-            }
-            LlmProviderConfig::Anthropic => {
-                let api_key = config.anthropic_api_key.clone().ok_or_else(|| {
-                    anyhow::anyhow!("ANTHROPIC_API_KEY not set for Nano provider")
-                })?;
-                Provider::Anthropic(AnthropicProvider::new(
-                    api_key,
-                    config.anthropic_base_url.clone(),
-                    config.nano_model.clone(),
-                ))
-            }
-        };
+        let nano_provider =
+            match config.nano_provider {
+                LlmProviderConfig::OpenAI => {
+                    let api_key = config.openai_api_key.clone().ok_or_else(|| {
+                        anyhow::anyhow!("OPENAI_API_KEY not set for Nano provider")
+                    })?;
+                    Provider::OpenAI(OpenAiProvider::new(
+                        api_key,
+                        config.openai_base_url.clone(),
+                        config.nano_model.clone(),
+                        nano_reasoning,
+                    ))
+                }
+                LlmProviderConfig::Anthropic => {
+                    let api_key = config.anthropic_api_key.clone().ok_or_else(|| {
+                        anyhow::anyhow!("ANTHROPIC_API_KEY not set for Nano provider")
+                    })?;
+                    Provider::Anthropic(AnthropicProvider::new(
+                        api_key,
+                        config.anthropic_base_url.clone(),
+                        config.nano_model.clone(),
+                    ))
+                }
+                LlmProviderConfig::Gemini => {
+                    let api_key = config.gemini_api_key.clone().ok_or_else(|| {
+                        anyhow::anyhow!("GEMINI_API_KEY not set for Nano provider")
+                    })?;
+                    Provider::Gemini(GeminiProvider::new(
+                        api_key,
+                        config.gemini_base_url.clone(),
+                        config.nano_model.clone(),
+                    ))
+                }
+            };
 
         let shizuka_provider = match config.shizuka_provider {
             LlmProviderConfig::OpenAI => {
@@ -58,6 +69,16 @@ impl LlmClient {
                 Provider::Anthropic(AnthropicProvider::new(
                     api_key,
                     config.anthropic_base_url.clone(),
+                    config.shizuka_model.clone(),
+                ))
+            }
+            LlmProviderConfig::Gemini => {
+                let api_key = config.gemini_api_key.clone().ok_or_else(|| {
+                    anyhow::anyhow!("GEMINI_API_KEY not set for Shizuka provider")
+                })?;
+                Provider::Gemini(GeminiProvider::new(
+                    api_key,
+                    config.gemini_base_url.clone(),
                     config.shizuka_model.clone(),
                 ))
             }
