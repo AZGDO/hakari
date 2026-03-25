@@ -657,9 +657,15 @@ impl ToolInterceptor {
 
         // Determine shell
         let (shell, shell_arg) = if cfg!(target_os = "windows") {
-            (std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()), "/C")
+            (
+                std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()),
+                "/C",
+            )
         } else {
-            (std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()), "-c")
+            (
+                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+                "-c",
+            )
         };
 
         let mut child = match Command::new(&shell)

@@ -96,11 +96,11 @@ pub struct TextSelection {
 
 #[allow(dead_code)]
 pub struct PendingStream {
-    pub content: Vec<MessageContent>,
-    pub fire_at: std::time::Instant,
-    pub loading_phrases: Vec<String>,
-    pub phrase_idx: usize,
-    pub phrase_deadline: std::time::Instant,
+    pub source_agent: String,
+    pub text: String,
+    pub spinner_frame: usize,
+    pub created_at: Instant,
+    pub meta: Option<std::collections::HashMap<String, String>>,
 }
 
 pub struct StreamingState {

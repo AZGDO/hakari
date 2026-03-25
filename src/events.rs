@@ -1,4 +1,6 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use std::time::Instant;
 
 use crate::config::{ConnectPhase, ConnectState};
@@ -541,7 +543,9 @@ fn handle_model_picker(state: &mut AppState, key: KeyEvent) -> AppAction {
                 AppAction::Redraw
             }
             KeyCode::Char(c) => {
-                state.model_custom_input.insert(state.model_custom_cursor, c);
+                state
+                    .model_custom_input
+                    .insert(state.model_custom_cursor, c);
                 state.model_custom_cursor += 1;
                 AppAction::Redraw
             }
@@ -606,9 +610,17 @@ fn apply_model_selection(state: &mut AppState, model_id: &str, provider: &str, d
         role: MessageRole::System,
         content: vec![MessageContent::Text(format!(
             "{} set to {} ({})",
-            if target == "shizuka" { "Shizuka" } else { "Nano" },
+            if target == "shizuka" {
+                "Shizuka"
+            } else {
+                "Nano"
+            },
             display,
-            if provider.is_empty() { "custom" } else { provider },
+            if provider.is_empty() {
+                "custom"
+            } else {
+                provider
+            },
         ))],
         timestamp: Instant::now(),
     });
@@ -954,7 +966,9 @@ fn handle_slash_command(state: &mut AppState, cmd: &str) -> AppAction {
         }
         "/model" => {
             // Show current provider/model configuration
-            let active = state.config.active_provider()
+            let active = state
+                .config
+                .active_provider()
                 .map(|(n, _)| n.to_string())
                 .unwrap_or_else(|| "none".into());
             let shizuka_prov = if state.config.preferences.shizuka_provider.is_empty() {

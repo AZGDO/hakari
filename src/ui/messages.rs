@@ -12,11 +12,11 @@ pub fn render_welcome_screen(frame: &mut Frame, state: &AppState, area: Rect) {
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
             ratatui::layout::Constraint::Min(0),
-            ratatui::layout::Constraint::Length(1),                // blank line
-            ratatui::layout::Constraint::Length(1),                // input separator top
+            ratatui::layout::Constraint::Length(1), // blank line
+            ratatui::layout::Constraint::Length(1), // input separator top
             ratatui::layout::Constraint::Length(input_line_count), // input (dynamic)
-            ratatui::layout::Constraint::Length(1),                // input separator bottom
-            ratatui::layout::Constraint::Length(1),                // status bar
+            ratatui::layout::Constraint::Length(1), // input separator bottom
+            ratatui::layout::Constraint::Length(1), // status bar
         ])
         .split(area);
 
@@ -27,11 +27,17 @@ pub fn render_welcome_screen(frame: &mut Frame, state: &AppState, area: Rect) {
     let status_area = main_chunks[5];
 
     // Welcome box with rounded border
-    crate::ui::layout::render_welcome_box(frame, state, welcome_area);
+    crate::ui::layout::renderer::render_welcome_box(frame, state, welcome_area);
 
     // Input area with horizontal rules
-    crate::ui::input::render_input_with_rules(frame, state, sep_top_area, input_line_area, sep_bottom_area);
+    crate::ui::input::render_input_with_rules(
+        frame,
+        state,
+        sep_top_area,
+        input_line_area,
+        sep_bottom_area,
+    );
 
     // Status bar
-    crate::ui::layout::render_status_bar(frame, state, status_area);
+    crate::ui::layout::renderer::render_status_bar(frame, state, status_area);
 }

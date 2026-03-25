@@ -33,13 +33,21 @@ pub struct GeminiMessage {
 pub enum GeminiPart {
     Text {
         text: String,
-        #[serde(rename = "thoughtSignature", skip_serializing_if = "Option::is_none", default)]
+        #[serde(
+            rename = "thoughtSignature",
+            skip_serializing_if = "Option::is_none",
+            default
+        )]
         thought_signature: Option<String>,
     },
     FunctionCall {
         #[serde(rename = "functionCall")]
         function_call: FunctionCall,
-        #[serde(rename = "thoughtSignature", skip_serializing_if = "Option::is_none", default)]
+        #[serde(
+            rename = "thoughtSignature",
+            skip_serializing_if = "Option::is_none",
+            default
+        )]
         thought_signature: Option<String>,
     },
     FunctionResponse {
@@ -51,7 +59,10 @@ pub enum GeminiPart {
 impl GeminiPart {
     /// Create a plain text part (no thought signature).
     pub fn text(s: impl Into<String>) -> Self {
-        Self::Text { text: s.into(), thought_signature: None }
+        Self::Text {
+            text: s.into(),
+            thought_signature: None,
+        }
     }
 }
 
@@ -122,7 +133,10 @@ impl GeminiClient {
 
     /// Build the endpoint URL for streaming (includes alt=sse).
     fn stream_url(&self, model: &str) -> String {
-        format!("{}/models/{}:streamGenerateContent?alt=sse", BASE_URL, model)
+        format!(
+            "{}/models/{}:streamGenerateContent?alt=sse",
+            BASE_URL, model
+        )
     }
 
     pub async fn generate(
@@ -330,13 +344,16 @@ impl GeminiClient {
                                             tx.send(StreamEvent::TextDelta(text.to_string())).await;
                                     }
                                 } else if let Some(fc) = part.get("functionCall") {
-                                    let thought_sig = part.get("thoughtSignature")
+                                    let thought_sig = part
+                                        .get("thoughtSignature")
                                         .and_then(|t| t.as_str())
                                         .map(|s| s.to_string());
                                     if let Ok(call) =
                                         serde_json::from_value::<FunctionCall>(fc.clone())
                                     {
-                                        let _ = tx.send(StreamEvent::FunctionCall(call, thought_sig)).await;
+                                        let _ = tx
+                                            .send(StreamEvent::FunctionCall(call, thought_sig))
+                                            .await;
                                     }
                                 }
                             }
@@ -390,7 +407,8 @@ impl GeminiClient {
         let mut parts = Vec::new();
         if let Some(parts_raw) = parts_raw {
             for part in parts_raw {
-                let thought_sig = part.get("thoughtSignature")
+                let thought_sig = part
+                    .get("thoughtSignature")
                     .and_then(|t| t.as_str())
                     .map(|s| s.to_string());
 

@@ -59,10 +59,7 @@ async fn main() -> io::Result<()> {
 
     let _ = execute!(
         stdout,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-        )
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
 
     let backend = CrosstermBackend::new(stdout);
@@ -126,6 +123,10 @@ async fn run_app(
         terminal.draw(|frame| {
             ui::render(frame, &mut state);
         })?;
+
+        // Re-enable mouse capture every frame — subprocesses (clip.exe, shell tools)
+        // can reset the terminal's mouse mode, causing scroll wheel to emit Up/Down keys
+        let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
 
         // Copy selected text to clipboard (extracted during render)
         if let Some(text) = state.clipboard_text.take() {
@@ -380,7 +381,7 @@ fn spawn_copilot_device_flow(state: &mut AppState, tx: mpsc::Sender<AgentEvent>)
 }
 
 fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
-    match event {
+        match event {
         AgentEvent::PhaseChange(phase) => {
             match phase.as_str() {
                 "shizuka" => {
@@ -437,6 +438,18 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
                 }],
                 timestamp: Instant::now(),
             });
+        }
+        AgentEvent::PendingStreamSet { source, text, meta } => {
+            state.pending_stream = Some(crate::state::PendingStream {
+                source_agent: source,
+                text,
+                spinner_frame: state.spinner_frame,
+                created_at: Instant::now(),
+                meta,
+            });
+        }
+        AgentEvent::PendingStreamClear => {
+            state.pending_stream = None;
         }
         AgentEvent::StreamChunk(text) => {
             state.is_loading = false;
@@ -799,4 +812,16 @@ fn session_to_messages(session: PersistedSession) -> Vec<Message> {
         .collect()
 }
 
-fn flush_shizuka_block(_state: &mut AppState) {}
+fn flush_shizuka_block(state: &mut AppState) {
+    // Move any ShizukaBlock-like system messages from the end of messages into a single
+    // system message so the UI can render it. Currently, Shizuka inserts a ShizukaBlock when
+    // ready; ensure we don't drop it. If multiple back-to-back system ShizukaBlocks exist,
+    // leave them as separate messages but ensure indices are consistent.
+    // (This is a conservative implementation: no buffering elsewhere exists.)
+    // No-op if no ShizukaBlock messages present.
+    // We won't modify message ordering here; this function is a placeholder to allow future
+    // buffering behaviour. For now, ensure we don't accidentally drop anything.
+    // (Function intentionally left simple.)
+    // Currently nothing to flush — kept for compatibility.
+}
+

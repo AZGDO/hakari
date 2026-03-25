@@ -72,6 +72,9 @@ pub struct Preparation {
     pub warnings: Vec<String>,
     #[serde(default)]
     pub sub_tasks: Vec<SubTaskDef>,
+    /// Optional diagnostic information when parsing was tolerant or repaired
+    #[serde(default)]
+    pub parsing_warnings: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,22 +299,167 @@ pub async fn run_shizuka(
         .generate_structured(model, &messages, &schema)
         .await?;
 
-    let mut preparation: Preparation = serde_json::from_str(&json_text)
-        .map_err(|e| format!("Failed to parse preparation JSON: {}", e))?;
+    // Tolerant parsing pipeline
+    // 1) Strict parse
+    let mut diagnostics: Vec<String> = Vec::new();
+    match parse_strict(&json_text) {
+        Ok(mut prep) => {
+            // Attach file content from cache
+            for cf in &mut prep.context_files {
+                if cf.content.is_empty() {
+                    if let Some(cached) = file_cache.get(&cf.path) {
+                        cf.content = cached.clone();
+                    } else {
+                        cf.content = read_file_from_root(project_root, &cf.path);
+                    }
+                }
+            }
+            return Ok(prep);
+        }
+        Err(e_strict) => {
+            diagnostics.push(format!("Strict parse failed: {}", e_strict));
+        }
+    }
 
-    // Attach file content from cache
-    for cf in &mut preparation.context_files {
-        if cf.content.is_empty() {
-            if let Some(cached) = file_cache.get(&cf.path) {
-                cf.content = cached.clone();
-            } else {
-                cf.content = read_file_from_root(project_root, &cf.path);
+    // 2) Parse as generic Value and map tolerantly
+    if let Ok(val) = serde_json::from_str::<Value>(&json_text) {
+        match parse_value_map_to_preparation(&val) {
+            Ok(mut prep) => {
+                diagnostics.push("Parsed from Value with tolerant mapping".into());
+                prep.parsing_warnings = Some(diagnostics.join("\n"));
+                // attach cached contents
+                for cf in &mut prep.context_files {
+                    if cf.content.is_empty() {
+                        if let Some(cached) = file_cache.get(&cf.path) {
+                            cf.content = cached.clone();
+                        } else {
+                            cf.content = read_file_from_root(project_root, &cf.path);
+                        }
+                    }
+                }
+                return Ok(prep);
+            }
+            Err(e_map) => {
+                diagnostics.push(format!("Value mapping failed: {}", e_map));
+            }
+        }
+    } else {
+        diagnostics.push("Failed to parse as generic JSON Value".into());
+    }
+
+    // 3) Try to extract a JSON block and normalize
+    if let Some(extracted) = try_extract_json_block(&json_text) {
+        let normalized = normalize_json_text(&extracted);
+        if let Ok(mut prep) = parse_strict(&normalized) {
+            diagnostics.push("Recovered by extracting JSON block".into());
+            prep.parsing_warnings = Some(diagnostics.join("\n"));
+            for cf in &mut prep.context_files {
+                if cf.content.is_empty() {
+                    if let Some(cached) = file_cache.get(&cf.path) {
+                        cf.content = cached.clone();
+                    } else {
+                        cf.content = read_file_from_root(project_root, &cf.path);
+                    }
+                }
+            }
+            return Ok(prep);
+        }
+        if let Ok(val) = serde_json::from_str::<Value>(&normalized) {
+            if let Ok(mut prep) = parse_value_map_to_preparation(&val) {
+                diagnostics.push("Recovered by extracting and normalizing JSON block".into());
+                prep.parsing_warnings = Some(diagnostics.join("\n"));
+                for cf in &mut prep.context_files {
+                    if cf.content.is_empty() {
+                        if let Some(cached) = file_cache.get(&cf.path) {
+                            cf.content = cached.clone();
+                        } else {
+                            cf.content = read_file_from_root(project_root, &cf.path);
+                        }
+                    }
+                }
+                return Ok(prep);
+            }
+        }
+    } else {
+        diagnostics.push("No JSON block could be extracted".into());
+    }
+
+    // 4) LLM repair attempts (limited)
+    let mut repair_attempts = 0u8;
+    let max_repairs = 2u8;
+    while repair_attempts < max_repairs {
+        repair_attempts += 1;
+        diagnostics.push(format!("Attempting LLM repair (attempt {})", repair_attempts));
+        match request_json_repair_via_llm(client, model, &messages, &json_text).await {
+            Ok(repaired_text) => {
+                // try strict
+                if let Ok(mut prep) = parse_strict(&repaired_text) {
+                    diagnostics.push("Repaired by LLM (strict parse)".into());
+                    prep.parsing_warnings = Some(diagnostics.join("\n"));
+                    for cf in &mut prep.context_files {
+                        if cf.content.is_empty() {
+                            if let Some(cached) = file_cache.get(&cf.path) {
+                                cf.content = cached.clone();
+                            } else {
+                                cf.content = read_file_from_root(project_root, &cf.path);
+                            }
+                        }
+                    }
+                    return Ok(prep);
+                }
+                if let Ok(val) = serde_json::from_str::<Value>(&repaired_text) {
+                    if let Ok(mut prep) = parse_value_map_to_preparation(&val) {
+                        diagnostics.push("Repaired by LLM (tolerant mapping)".into());
+                        prep.parsing_warnings = Some(diagnostics.join("\n"));
+                        for cf in &mut prep.context_files {
+                            if cf.content.is_empty() {
+                                if let Some(cached) = file_cache.get(&cf.path) {
+                                    cf.content = cached.clone();
+                                } else {
+                                    cf.content = read_file_from_root(project_root, &cf.path);
+                                }
+                            }
+                        }
+                        return Ok(prep);
+                    }
+                }
+                diagnostics.push("LLM repair did not yield valid Preparation".into());
+            }
+            Err(e) => {
+                diagnostics.push(format!("LLM repair request failed: {}", e));
+                break;
             }
         }
     }
 
-    Ok(preparation)
+    // Fallback: best-effort Preparation using cached files
+    diagnostics.push("Falling back to best-effort Preparation".into());
+    let mut context_files: Vec<ContextFile> = Vec::new();
+    for (path, content) in file_cache.iter() {
+        context_files.push(ContextFile {
+            path: path.clone(),
+            role: "context".into(),
+            content: content.clone(),
+            compact_summary: "(cached content)".into(),
+            annotations: String::new(),
+            focus_regions: Vec::new(),
+        });
+    }
+    let prep = Preparation {
+        task_classification: "small".into(),
+        task_summary: "Partial preparation due to malformed model output".into(),
+        direct_answer: None,
+        context_files,
+        approach: None,
+        learnings: Vec::new(),
+        warnings: vec!["Parsing failed; returned partial preparation".into()],
+        sub_tasks: Vec::new(),
+        parsing_warnings: Some(diagnostics.join("\n\nOriginal assistant output:\n") + &json_text),
+    };
+
+    Ok(prep)
 }
+
 
 // ── Local tool execution (shared, not provider-specific) ────────────────────
 
@@ -329,10 +477,330 @@ fn truncate_for_model(content: &str, max_bytes: usize) -> String {
     )
 }
 
+// ---------------- Tolerant parsing helpers ----------------
+
+fn parse_strict(text: &str) -> Result<Preparation, String> {
+    serde_json::from_str::<Preparation>(text).map_err(|e| format!("strict parse error: {}", e))
+}
+
+fn parse_value_map_to_preparation(val: &Value) -> Result<Preparation, String> {
+    let mut diag: Vec<String> = Vec::new();
+    // Expect object
+    let obj = match val.as_object() {
+        Some(o) => o,
+        None => {
+            // If top-level array, assume it's context_files
+            if let Some(arr) = val.as_array() {
+                diag.push("Top-level array found; treating as context_files".into());
+                let mut context_files = Vec::new();
+                for v in arr {
+                    if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
+                        let role = v
+                            .get("role")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("context")
+                            .to_string();
+                        let compact = v
+                            .get("compact_summary")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("(no summary)")
+                            .to_string();
+                        context_files.push(ContextFile {
+                            path: p.to_string(),
+                            role,
+                            content: String::new(),
+                            compact_summary: compact,
+                            annotations: v
+                                .get("annotations")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            focus_regions: Vec::new(),
+                        });
+                    }
+                }
+                let prep = Preparation {
+                    task_classification: "small".into(),
+                    task_summary: "Partial prep from array output".into(),
+                    direct_answer: None,
+                    context_files,
+                    approach: None,
+                    learnings: Vec::new(),
+                    warnings: Vec::new(),
+                    sub_tasks: Vec::new(),
+                    parsing_warnings: Some(diag.join("\n")),
+                };
+                return Ok(prep);
+            }
+            return Err("value is not an object or array".into());
+        }
+    };
+
+    // helpers to coerce
+    fn coerce_string(
+        obj: &serde_json::Map<String, Value>,
+        k: &str,
+        diag: &mut Vec<String>,
+    ) -> Option<String> {
+        obj.get(k).and_then(|v| {
+            if v.is_string() {
+                v.as_str().map(|s| s.to_string())
+            } else if v.is_array() {
+                // join array elements
+                let parts: Vec<String> = v
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                    .collect();
+                if !parts.is_empty() {
+                    diag.push(format!("Coerced array -> string for key {} by joining", k));
+                    Some(parts.join(" "))
+                } else {
+                    None
+                }
+            } else if v.is_number() || v.is_boolean() {
+                Some(v.to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    let task_classification = coerce_string(obj, "task_classification", &mut diag).unwrap_or_else(|| {
+        diag.push("Missing task_classification; defaulting to 'small'".into());
+        "small".into()
+    });
+    let task_summary = coerce_string(obj, "task_summary", &mut diag).unwrap_or_else(|| {
+        diag.push("Missing task_summary; defaulting".into());
+        "(no summary provided)".into()
+    });
+    let direct_answer = obj.get("direct_answer").and_then(|v| {
+        if v.is_string() {
+            v.as_str().map(|s| s.to_string())
+        } else if v.is_array() {
+            let parts: Vec<String> = v
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                .collect();
+            if !parts.is_empty() {
+                diag.push("Coerced direct_answer array -> string".into());
+                Some(parts.join(" "))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+
+    // context_files
+    let mut context_files: Vec<ContextFile> = Vec::new();
+    if let Some(cf_val) = obj.get("context_files") {
+        if let Some(arr) = cf_val.as_array() {
+            for item in arr {
+                if let Some(it) = item.as_object() {
+                    let path = it
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(unknown)")
+                        .to_string();
+                    let role = it
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("context")
+                        .to_string();
+                    let compact_summary = it
+                        .get("compact_summary")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let annotations = it
+                        .get("annotations")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let mut focus_regions = Vec::new();
+                    if let Some(fr_arr) = it.get("focus_regions").and_then(|v| v.as_array()) {
+                        for fr in fr_arr {
+                            if let Some(fr_obj) = fr.as_object() {
+                                let start_line = fr_obj
+                                    .get("start_line")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(1) as usize;
+                                let end_line = fr_obj
+                                    .get("end_line")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(start_line as u64)
+                                    as usize;
+                                let description = fr_obj
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                focus_regions.push(FocusRegion {
+                                    start_line,
+                                    end_line,
+                                    description,
+                                });
+                            }
+                        }
+                    }
+                    context_files.push(ContextFile {
+                        path,
+                        role,
+                        content: String::new(),
+                        compact_summary,
+                        annotations,
+                        focus_regions,
+                    });
+                }
+            }
+        }
+    }
+
+    let approach = obj.get("approach").and_then(|v| v.as_str().map(|s| s.to_string()));
+    let learnings = obj
+        .get("learnings")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_else(Vec::new);
+    let warnings = obj
+        .get("warnings")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_else(Vec::new);
+    let sub_tasks = obj
+        .get("sub_tasks")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.get("description").and_then(|d| d.as_str()).map(|s| {
+                    SubTaskDef {
+                        description: s.to_string(),
+                    }
+                }))
+                .collect()
+        })
+        .unwrap_or_else(Vec::new);
+
+    let prep = Preparation {
+        task_classification,
+        task_summary,
+        direct_answer,
+        context_files,
+        approach,
+        learnings,
+        warnings,
+        sub_tasks,
+        parsing_warnings: Some(diag.join("\n")),
+    };
+
+    Ok(prep)
+}
+
+fn try_extract_json_block(s: &str) -> Option<String> {
+    // Remove markdown fences and look for first balanced {..} or [..]
+    let cleaned = s
+        .replace("```json", "")
+        .replace("```", "")
+        .replace("\r", "");
+
+    // Try find '{' block
+    if let Some(start) = cleaned.find('{') {
+        let mut depth = 0i32;
+        for (i, ch) in cleaned.chars().enumerate().skip(start) {
+            if ch == '{' {
+                depth += 1;
+            } else if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(cleaned[start..=i].to_string());
+                }
+            }
+        }
+        // fallback: take from first '{' to last '}'
+        if let Some(last) = cleaned.rfind('}') {
+            if last > start {
+                return Some(cleaned[start..=last].to_string());
+            }
+        }
+    }
+    // Try array
+    if let Some(start) = cleaned.find('[') {
+        let mut depth = 0i32;
+        for (i, ch) in cleaned.chars().enumerate().skip(start) {
+            if ch == '[' {
+                depth += 1;
+            } else if ch == ']' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(cleaned[start..=i].to_string());
+                }
+            }
+        }
+        if let Some(last) = cleaned.rfind(']') {
+            if last > start {
+                return Some(cleaned[start..=last].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn normalize_json_text(s: &str) -> String {
+    let mut out = s.to_string();
+    // Remove JS-style comments
+    out = out
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !t.starts_with("//") && !t.starts_with("/*") && !t.starts_with("* ")
+        })
+        .collect::<Vec<&str>>()
+        .join("\n");
+    // Remove trailing commas before } or ]
+    out = out.replace(",\n}", "\n}");
+    out = out.replace(",\n]", "\n]");
+    // Trim fences
+    out = out.trim().to_string();
+    out
+}
+
+async fn request_json_repair_via_llm(
+    client: &dyn LlmClient,
+    model: &str,
+    previous_messages: &[LlmMessage],
+    previous_output: &str,
+) -> Result<String, String> {
+    let repair_prompt = "You previously returned invalid JSON. Using the Preparation schema, output only valid JSON matching the schema. Do not include any explanations.";
+    let mut msgs: Vec<LlmMessage> = vec![LlmMessage::System(repair_prompt.to_string())];
+    // include previous assistant content for context
+    msgs.push(LlmMessage::User(format!(
+        "Previous assistant output:\n\n{}",
+        previous_output
+    )));
+    // Also include a compact trace of earlier messages (user asks) if available
+    if let Some(LlmMessage::User(u)) = previous_messages.iter().find(|m| matches!(m, LlmMessage::User(_))) {
+        msgs.push(LlmMessage::User(format!("User request context:\n{}", u)));
+    }
+    let resp = client.generate(model, &msgs, &[]).await?;
+    Ok(resp.text)
+}
+
 fn read_file_from_root(project_root: &str, path: &str) -> String {
     let full = std::path::Path::new(project_root).join(path);
-    std::fs::read_to_string(&full)
-        .unwrap_or_else(|e| format!("(could not read {}: {})", path, e))
+    std::fs::read_to_string(&full).unwrap_or_else(|e| format!("(could not read {}: {})", path, e))
 }
 
 fn execute_shizuka_tool(
@@ -361,10 +829,7 @@ fn execute_shizuka_tool(
         }
         "shizuka_read_lines" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let start = args
-                .get("start_line")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1) as usize;
+            let start = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
             let end = args
                 .get("end_line")
                 .and_then(|v| v.as_u64())
@@ -404,10 +869,7 @@ fn execute_shizuka_tool(
             output
         }
         "shizuka_grep" => {
-            let pattern = args
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             let search_path = args.get("path").and_then(|v| v.as_str());
             let search_dir = match search_path {
                 Some(p) if !p.is_empty() => root.join(p),

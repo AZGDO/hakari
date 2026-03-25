@@ -253,10 +253,7 @@ pub fn build_nano_user_message(prep: &Preparation) -> String {
     } else {
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
     };
-    msg.push_str(&format!(
-        "\nEnvironment: OS={}, shell={}\n",
-        os_name, shell
-    ));
+    msg.push_str(&format!("\nEnvironment: OS={}, shell={}\n", os_name, shell));
 
     msg.push_str("\nIMPORTANT: After making all changes, use execute() to verify your work compiles and tests pass. Fix any errors before finishing.\n");
 
@@ -404,7 +401,15 @@ pub async fn run_nano(
             tool_calls: turn_tool_calls.clone(),
         });
 
+        // Publish pending stream to UI so the input can display what will be sent when model is ready
         if !turn_text.is_empty() {
+            let _ = tx
+                .send(AgentEvent::PendingStreamSet {
+                    source: "nano".into(),
+                    text: turn_text.clone(),
+                    meta: None,
+                })
+                .await;
             full_response_text.push_str(&turn_text);
         }
 

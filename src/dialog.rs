@@ -168,9 +168,7 @@ pub fn render_dialog(
     let dialog_width = config.width.min(area.width.saturating_sub(4));
     let total_lines = all_lines.len() as u16;
     // +2 for top/bottom border
-    let dialog_height = (total_lines + 2)
-        .min(area.height.saturating_sub(2))
-        .max(4); // minimum usable height
+    let dialog_height = (total_lines + 2).min(area.height.saturating_sub(2)).max(4); // minimum usable height
     let dialog_x = area.width.saturating_sub(dialog_width) / 2;
     let dialog_y = area.height.saturating_sub(dialog_height) / 2;
     let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);

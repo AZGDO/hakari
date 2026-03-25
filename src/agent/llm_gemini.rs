@@ -112,7 +112,10 @@ fn convert_response(resp: crate::gemini::GeminiResponse) -> LlmResponse {
     for part in resp.parts {
         match part {
             GeminiPart::Text { text: t, .. } => text.push_str(&t),
-            GeminiPart::FunctionCall { function_call: fc, thought_signature: ts } => {
+            GeminiPart::FunctionCall {
+                function_call: fc,
+                thought_signature: ts,
+            } => {
                 tool_calls.push(ToolCall {
                     id: fc.id.unwrap_or_default(),
                     name: fc.name,
@@ -171,7 +174,13 @@ impl LlmClient for GeminiLlm {
         let model = model.to_string();
         let handle = tokio::spawn(async move {
             let _ = client
-                .generate_stream(&model, &gemini_msgs, system.as_deref(), &gemini_tools, inner_tx)
+                .generate_stream(
+                    &model,
+                    &gemini_msgs,
+                    system.as_deref(),
+                    &gemini_tools,
+                    inner_tx,
+                )
                 .await;
         });
 

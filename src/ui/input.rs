@@ -1,13 +1,14 @@
 use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
-use ratatui::style::{Style, Modifier};
 use ratatui::Frame;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::state::AppState;
 use crate::types::PermissionMode;
 use crate::ui::helpers::mode_color;
+use crate::ui::wrapping::{compute_visual_cursor, visual_lines_for_line};
 
 pub fn render_input_with_rules(
     frame: &mut Frame,
@@ -41,12 +42,26 @@ pub fn render_input_with_rules(
         .map(|(sym, title, _)| format!("{} {}  ", sym, title).len() as u16)
         .unwrap_or(0);
 
+    // Choose displayed text: pending stream takes precedence for display
+    let displayed_input = if let Some(ref p) = state.pending_stream {
+        p.text.as_str()
+    } else {
+        state.input.as_str()
+    };
+
     // Split input into lines
-    let input_lines: Vec<&str> = state.input.split('\n').collect();
+    let input_lines: Vec<&str> = displayed_input.split('\n').collect();
 
     // Compute (cursor_row, cursor_col) from flat cursor_pos (logical coordinates)
     let (cursor_row, cursor_col) = {
         let mut rem = state.cursor_pos;
+        // If pending_stream is showing, clamp cursor to displayed content length
+        if state.pending_stream.is_some() {
+            let total_chars: usize = displayed_input.chars().count();
+            if rem > total_chars {
+                rem = total_chars;
+            }
+        }
         let mut row = 0usize;
         let mut col = 0usize;
         for (i, ln) in input_lines.iter().enumerate() {
@@ -129,46 +144,6 @@ pub fn render_input_with_rules(
         let indent_w = UnicodeWidthStr::width("  ");
         let sub_w = eff_w.saturating_sub(indent_w).max(1);
 
-        // helpers
-        fn visual_width_str(s: &str) -> usize {
-            s.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum()
-        }
-        fn visual_lines_for_line(line: &str, first_w: usize, sub_w: usize, is_first: bool) -> usize {
-            let total = visual_width_str(line);
-            if total == 0 {
-                1
-            } else if is_first {
-                if total <= first_w {
-                    1
-                } else {
-                    1 + ((total.saturating_sub(first_w) + sub_w - 1) / sub_w)
-                }
-            } else {
-                (total + sub_w - 1) / sub_w
-            }
-        }
-        fn compute_visual_cursor(line: &str, logical_col: usize, first_w: usize, sub_w: usize, is_first: bool) -> (usize, usize) {
-            let mut curr_wrap = 0usize;
-            let mut curr_w = 0usize;
-            let mut limit = if is_first { first_w } else { sub_w };
-            for (idx, ch) in line.chars().enumerate() {
-                if idx >= logical_col {
-                    break;
-                }
-                let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-                if limit == 0 {
-                    limit = 1;
-                }
-                if curr_w + w > limit {
-                    curr_wrap += 1;
-                    curr_w = 0;
-                    limit = sub_w;
-                }
-                curr_w += w;
-            }
-            (curr_wrap, curr_w)
-        }
-
         let mut visual_row: usize = 0;
         let mut cursor_visual_col: usize = 0;
         let mut cursor_wrap_index: usize = 0; // which wrapped visual line within the logical line
@@ -177,7 +152,8 @@ pub fn render_input_with_rules(
             if i < cursor_row {
                 visual_row += visual_lines_for_line(ln, first_w, sub_w, i == 0);
             } else if i == cursor_row {
-                let (wrap_index, vis_col) = compute_visual_cursor(ln, cursor_col, first_w, sub_w, i == 0);
+                let (wrap_index, vis_col) =
+                    compute_visual_cursor(ln, cursor_col, first_w, sub_w, i == 0);
                 cursor_wrap_index = wrap_index;
                 cursor_visual_col = vis_col;
                 visual_row += cursor_wrap_index;
@@ -198,6 +174,7 @@ pub fn render_input_with_rules(
         let vis_row = visual_row as isize - scroll;
         if vis_row >= 0 && (vis_row as u16) < input_area.height {
             let cy = input_area.y + vis_row as u16;
+            // Use new API frame.set_cursor which takes (u16,u16)
             if cx < input_area.x + input_area.width.saturating_sub(indicator_width)
                 && cy < input_area.y + input_area.height
             {

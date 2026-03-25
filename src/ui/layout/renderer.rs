@@ -9,7 +9,9 @@ use ratatui::{
     Frame,
 };
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
+
+use crate::ui::wrapping::{compute_visual_cursor, visual_lines_for_line, wrapped_height};
 
 use crate::config::ConnectPhase;
 use crate::dialog::{render_dialog, DialogConfig, DialogRow};
@@ -18,24 +20,6 @@ use crate::theme::Theme;
 use crate::types::*;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/// Compute the number of terminal rows a list of Lines will occupy after word-wrap at `width`.
-fn wrapped_height(lines: &[Line], width: usize) -> usize {
-    if width == 0 {
-        return lines.len();
-    }
-    lines
-        .iter()
-        .map(|line| {
-            let display_width: usize = line.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
-            if display_width == 0 {
-                1
-            } else {
-                (display_width + width - 1) / width
-            }
-        })
-        .sum()
-}
 
 const GRADIENT_COLORS: &[(u8, u8, u8)] = &[
     (235, 95, 87),
@@ -142,11 +126,19 @@ fn render_selection(frame: &mut Frame, state: &mut AppState) {
 
     // Apply highlight and optionally extract text
     let extracting = state.clipboard_pending;
-    let mut extracted = if extracting { Some(String::new()) } else { None };
+    let mut extracted = if extracting {
+        Some(String::new())
+    } else {
+        None
+    };
 
     for row in start.1..=end.1 {
         let col_start = if row == start.1 { start.0 } else { 0 };
-        let col_end = if row == end.1 { end.0 } else { w.saturating_sub(1) };
+        let col_end = if row == end.1 {
+            end.0
+        } else {
+            w.saturating_sub(1)
+        };
 
         let mut line_text = String::new();
         for col in col_start..=col_end {
@@ -242,8 +234,14 @@ fn render_welcome_screen(frame: &mut Frame, state: &AppState, area: Rect) {
     // Welcome box with rounded border
     render_welcome_box(frame, state, welcome_area);
 
-    // Input area with horizontal rules
-    render_input_with_rules(frame, state, sep_top_area, input_line_area, sep_bottom_area);
+    // Input area with horizontal rules: delegate to shared input renderer
+    crate::ui::input::render_input_with_rules(
+        frame,
+        state,
+        sep_top_area,
+        input_line_area,
+        sep_bottom_area,
+    );
 
     // Status bar
     render_status_bar(frame, state, status_area);
@@ -379,209 +377,6 @@ pub fn render_welcome_box(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(para, inner);
 }
 
-fn render_input_with_rules(
-    frame: &mut Frame,
-    state: &AppState,
-    sep_top: Rect,
-    input_area: Rect,
-    sep_bottom: Rect,
-) {
-    let theme = &state.theme;
-
-    // Top separator
-    let rule = "─".repeat(sep_top.width as usize);
-    let top_rule = Paragraph::new(Span::styled(
-        rule.clone(),
-        Style::default().fg(theme.subtle),
-    ));
-    frame.render_widget(top_rule, sep_top);
-
-    let is_busy = state.is_loading || state.streaming.is_some() || state.pending_stream.is_some();
-    let prompt_char = if is_busy { "↯" } else { "❯" };
-    let prompt_color = if is_busy { theme.claude } else { theme.text };
-    let _prompt_width: u16 = 2;
-
-    // Mode indicator on the right
-    let mode_indicator = match &state.permission_mode {
-        PermissionMode::Default => None,
-        mode => Some((mode.symbol(), mode.short_title(), mode_color(mode, theme))),
-    };
-    let indicator_width = mode_indicator
-        .as_ref()
-        .map(|(sym, title, _)| format!("{} {}  ", sym, title).len() as u16)
-        .unwrap_or(0);
-
-    // Split input into lines
-
-    let input_lines: Vec<&str> = state.input.split('\n').collect();
-
-    // Compute (cursor_row, cursor_col) from flat cursor_pos (logical coordinates)
-    let (cursor_row, cursor_col) = {
-        let mut rem = state.cursor_pos;
-        let mut row = 0usize;
-        let mut col = 0usize;
-        for (i, ln) in input_lines.iter().enumerate() {
-            let len = ln.chars().count();
-            if rem <= len || i == input_lines.len() - 1 {
-                row = i;
-                col = rem.min(len);
-                break;
-            }
-            rem -= len + 1; // +1 for '\n'
-        }
-        (row, col)
-    };
-
-    // Build ratatui Lines: first gets prompt prefix, rest get indent
-    let mut rendered: Vec<Line> = input_lines
-        .iter()
-        .enumerate()
-        .map(|(i, ln)| {
-            if i == 0 {
-                Line::from(vec![
-                    Span::styled(
-                        format!("{} ", prompt_char),
-                        Style::default()
-                            .fg(prompt_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(ln.to_string(), Style::default().fg(theme.text)),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(ln.to_string(), Style::default().fg(theme.text)),
-                ])
-            }
-        })
-        .collect();
-
-    // If empty, still show one blank line with just the prompt
-    if rendered.is_empty() {
-        rendered.push(Line::from(Span::styled(
-            format!("{} ", prompt_char),
-            Style::default()
-                .fg(prompt_color)
-                .add_modifier(Modifier::BOLD),
-        )));
-    }
-
-    // Render the input paragraph with wrapping
-    let input_paragraph = Paragraph::new(rendered).wrap(Wrap::default());
-    frame.render_widget(input_paragraph, input_area);
-
-    // Mode indicator right-aligned on first row
-    if let Some((symbol, title, color)) = mode_indicator {
-        let indicator_text = format!("{} {} ", symbol, title);
-        let iw = indicator_text.len() as u16;
-        if input_area.width > iw + 4 {
-            let ind_area = Rect::new(input_area.x + input_area.width - iw, input_area.y, iw, 1);
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    indicator_text,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ))),
-                ind_area,
-            );
-        }
-    }
-
-    // Cursor: compute visual coordinates accounting for wrapping and prompt/indent
-    if !is_busy {
-        let area_w = input_area.width as usize;
-        // effective width respects the mode indicator on the right
-        let eff_w = area_w.saturating_sub(indicator_width as usize).max(1);
-        // compute actual prompt width (prompt + trailing space)
-        let prompt_prefix = format!("{} ", prompt_char);
-        let pw = UnicodeWidthStr::width(prompt_prefix.as_str());
-        // width available for text on the first logical line (after prompt)
-        let first_w = eff_w.saturating_sub(pw).max(1);
-        // width available for subsequent logical lines (after indent "  ")
-        let indent_w = UnicodeWidthStr::width("  ");
-        let sub_w = eff_w.saturating_sub(indent_w).max(1);
-
-        // helpers
-        fn visual_width_str(s: &str) -> usize {
-            s.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum()
-        }
-        fn visual_lines_for_line(line: &str, first_w: usize, sub_w: usize, is_first: bool) -> usize {
-            let total = visual_width_str(line);
-            if total == 0 {
-                1
-            } else if is_first {
-                if total <= first_w {
-                    1
-                } else {
-                    1 + ((total.saturating_sub(first_w) + sub_w - 1) / sub_w)
-                }
-            } else {
-                (total + sub_w - 1) / sub_w
-            }
-        }
-        fn compute_visual_cursor(line: &str, logical_col: usize, first_w: usize, sub_w: usize, is_first: bool) -> (usize, usize) {
-            let mut curr_wrap = 0usize;
-            let mut curr_w = 0usize;
-            let mut limit = if is_first { first_w } else { sub_w };
-            for (idx, ch) in line.chars().enumerate() {
-                if idx >= logical_col {
-                    break;
-                }
-                let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-                if limit == 0 {
-                    limit = 1;
-                }
-                if curr_w + w > limit {
-                    curr_wrap += 1;
-                    curr_w = 0;
-                    limit = sub_w;
-                }
-                curr_w += w;
-            }
-            (curr_wrap, curr_w)
-        }
-
-        let mut visual_row: usize = 0;
-        let mut cursor_visual_col: usize = 0;
-        let mut cursor_wrap_index: usize = 0; // which wrapped visual line within the logical line
-
-        for (i, ln) in input_lines.iter().enumerate() {
-            if i < cursor_row {
-                visual_row += visual_lines_for_line(ln, first_w, sub_w, i == 0);
-            } else if i == cursor_row {
-                let (wrap_index, vis_col) = compute_visual_cursor(ln, cursor_col, first_w, sub_w, i == 0);
-                cursor_wrap_index = wrap_index;
-                cursor_visual_col = vis_col;
-                visual_row += cursor_wrap_index;
-                break;
-            }
-        }
-
-        // Determine absolute cursor X based on whether it's on the first visual line of its logical line
-        let on_first_vis_of_line = cursor_wrap_index == 0;
-        let x_base = if cursor_row == 0 && on_first_vis_of_line {
-            input_area.x + pw as u16
-        } else {
-            input_area.x + indent_w as u16 // indent for wrapped/subsequent lines
-        };
-        let cx = x_base + cursor_visual_col as u16;
-        // Respect input_scroll: compute visible row relative to input_area
-        let scroll = state.input_scroll as isize;
-        let vis_row = visual_row as isize - scroll;
-        if vis_row >= 0 && (vis_row as u16) < input_area.height {
-            let cy = input_area.y + vis_row as u16;
-            if cx < input_area.x + input_area.width.saturating_sub(indicator_width)
-                && cy < input_area.y + input_area.height
-            {
-                frame.set_cursor_position((cx, cy));
-            }
-        }
-    }
-
-    // Bottom separator
-    let bottom_rule = Paragraph::new(Span::styled(rule, Style::default().fg(theme.subtle)));
-    frame.render_widget(bottom_rule, sep_bottom);
-}
-
 fn render_chat_screen(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let is_busy = state.is_loading || state.streaming.is_some() || state.pending_stream.is_some();
 
@@ -610,7 +405,14 @@ fn render_chat_screen(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let status_area = chunks[4];
 
     render_messages(frame, state, messages_area);
-    render_input_with_rules(frame, state, sep_top_area, input_line_area, sep_bottom_area);
+    // Delegate input rendering to ui::input to avoid duplication
+    crate::ui::input::render_input_with_rules(
+        frame,
+        state,
+        sep_top_area,
+        input_line_area,
+        sep_bottom_area,
+    );
     render_status_bar(frame, state, status_area);
 }
 
@@ -1356,20 +1158,23 @@ pub fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let mut right_parts = phase_indicator;
     // Show current model name (more useful than raw provider name)
-    let model_display = if state.model_name.is_empty() || state.model_name == "auto (selected by Shizuka)" {
-        // Show configured providers instead
-        let shizuka_p = &state.config.preferences.shizuka_provider;
-        let nano_p = &state.config.preferences.nano_provider;
-        if !shizuka_p.is_empty() && !nano_p.is_empty() && shizuka_p != nano_p {
-            format!("{}/{}", shizuka_p, nano_p)
+    let model_display =
+        if state.model_name.is_empty() || state.model_name == "auto (selected by Shizuka)" {
+            // Show configured providers instead
+            let shizuka_p = &state.config.preferences.shizuka_provider;
+            let nano_p = &state.config.preferences.nano_provider;
+            if !shizuka_p.is_empty() && !nano_p.is_empty() && shizuka_p != nano_p {
+                format!("{}/{}", shizuka_p, nano_p)
+            } else {
+                state
+                    .config
+                    .active_provider()
+                    .map(|(name, _)| name.to_string())
+                    .unwrap_or_else(|| "no provider".into())
+            }
         } else {
-            state.config.active_provider()
-                .map(|(name, _)| name.to_string())
-                .unwrap_or_else(|| "no provider".into())
-        }
-    } else {
-        state.model_name.clone()
-    };
+            state.model_name.clone()
+        };
     right_parts.push(Span::styled(
         model_display,
         Style::default().fg(theme.inactive),
@@ -1387,7 +1192,8 @@ pub fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
 
 fn render_slash_menu(frame: &mut Frame, state: &mut AppState, area: Rect) {
     // Collect filtered commands into owned data to release borrow on state
-    let commands: Vec<(String, String)> = state.filtered_commands()
+    let commands: Vec<(String, String)> = state
+        .filtered_commands()
         .iter()
         .map(|cmd| (cmd.name.clone(), cmd.description.clone()))
         .collect();
@@ -1431,18 +1237,20 @@ fn render_slash_menu(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let scroll = state.slash_scroll.min(total.saturating_sub(visible));
 
     let mut lines = Vec::new();
-    for (i, (name, desc)) in commands
-        .iter()
-        .skip(scroll)
-        .take(visible)
-        .enumerate()
-    {
+    for (i, (name, desc)) in commands.iter().skip(scroll).take(visible).enumerate() {
         let actual_idx = i + scroll;
         let is_selected = actual_idx == state.slash_selected;
 
-        let bg = if is_selected { theme.subtle } else { Color::Reset };
+        let bg = if is_selected {
+            theme.subtle
+        } else {
+            Color::Reset
+        };
         let name_style = if is_selected {
-            Style::default().fg(theme.text).bg(bg).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.text)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.text)
         };
@@ -1678,11 +1486,16 @@ fn render_help_overlay(frame: &mut Frame, state: &mut AppState, area: Rect) {
         } else if desc.is_empty() {
             rows.push(DialogRow::text(Line::from(Span::styled(
                 format!(" {}", key),
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                Style::default()
+                    .fg(theme.text)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             ))));
         } else {
             rows.push(DialogRow::text(Line::from(vec![
-                Span::styled(format!(" {:16}", key), Style::default().fg(theme.suggestion)),
+                Span::styled(
+                    format!(" {:16}", key),
+                    Style::default().fg(theme.suggestion),
+                ),
                 Span::styled(desc.to_string(), Style::default().fg(theme.text)),
             ])));
         }
@@ -1710,10 +1523,14 @@ fn render_model_picker(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
     for (i, model) in models.iter().enumerate() {
         if model.is_header {
-            if i > 0 { rows.push(DialogRow::blank()); }
+            if i > 0 {
+                rows.push(DialogRow::blank());
+            }
             rows.push(DialogRow::header(Line::from(Span::styled(
                 format!(" ─ {} ─", model.display_name),
-                Style::default().fg(theme.suggestion).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.suggestion)
+                    .add_modifier(Modifier::BOLD),
             ))));
             continue;
         }
@@ -1723,7 +1540,9 @@ fn render_model_picker(frame: &mut Frame, state: &mut AppState, area: Rect) {
         let prefix = if is_selected { " ▸ " } else { "   " };
         let suffix = if is_current { " (current)" } else { "" };
         let name_style = if is_selected {
-            Style::default().fg(theme.suggestion).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.suggestion)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.text)
         };
@@ -1739,15 +1558,22 @@ fn render_model_picker(frame: &mut Frame, state: &mut AppState, area: Rect) {
             ));
         }
         if let Some(rate) = model.rate_multiplier {
-            let rate_color = if rate < 0.5 { theme.success }
-                else if rate <= 1.0 { theme.inactive }
-                else { theme.warning };
+            let rate_color = if rate < 0.5 {
+                theme.success
+            } else if rate <= 1.0 {
+                theme.inactive
+            } else {
+                theme.warning
+            };
             spans.push(Span::styled(
                 format!(" {}x", rate),
                 Style::default().fg(rate_color).add_modifier(Modifier::BOLD),
             ));
         }
-        spans.push(Span::styled(suffix.to_string(), Style::default().fg(theme.success)));
+        spans.push(Span::styled(
+            suffix.to_string(),
+            Style::default().fg(theme.success),
+        ));
 
         let mut item_lines = vec![Line::from(spans)];
         if !model.description.is_empty() {
@@ -1763,22 +1589,40 @@ fn render_model_picker(frame: &mut Frame, state: &mut AppState, area: Rect) {
     // Custom model row (also selectable)
     let custom_is_selected = selectable_idx == state.dialog.selected;
     rows.push(DialogRow::blank());
-    let custom_style = if (custom_is_selected && !state.model_picker_typing) || state.model_picker_typing {
-        Style::default().fg(theme.suggestion).add_modifier(Modifier::BOLD)
+    let custom_style =
+        if (custom_is_selected && !state.model_picker_typing) || state.model_picker_typing {
+            Style::default()
+                .fg(theme.suggestion)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.inactive)
+        };
+    let custom_prefix = if custom_is_selected && !state.model_picker_typing {
+        " ▸ "
     } else {
-        Style::default().fg(theme.inactive)
+        "   "
     };
-    let custom_prefix = if custom_is_selected && !state.model_picker_typing { " ▸ " } else { "   " };
     let mut custom_lines = vec![Line::from(vec![
         Span::styled(custom_prefix.to_string(), custom_style),
         Span::styled("Custom model ID...".to_string(), custom_style),
     ])];
     if state.model_picker_typing {
         let input = &state.model_custom_input;
-        let display = if input.is_empty() { "type model ID and press Enter".to_string() } else { input.clone() };
+        let display = if input.is_empty() {
+            "type model ID and press Enter".to_string()
+        } else {
+            input.clone()
+        };
         custom_lines.push(Line::from(vec![
             Span::styled("     > ", Style::default().fg(theme.suggestion)),
-            Span::styled(display, if input.is_empty() { Style::default().fg(theme.subtle) } else { Style::default().fg(theme.text) }),
+            Span::styled(
+                display,
+                if input.is_empty() {
+                    Style::default().fg(theme.subtle)
+                } else {
+                    Style::default().fg(theme.text)
+                },
+            ),
         ]));
     }
     rows.push(DialogRow::item(custom_lines));
@@ -1787,18 +1631,43 @@ fn render_model_picker(frame: &mut Frame, state: &mut AppState, area: Rect) {
     rows.push(DialogRow::blank());
     if state.model_picker_typing {
         rows.push(DialogRow::text(Line::from(vec![
-            Span::styled("  Enter", Style::default().fg(theme.suggestion).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  Enter",
+                Style::default()
+                    .fg(theme.suggestion)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" confirm · ", Style::default().fg(theme.inactive)),
-            Span::styled("Esc", Style::default().fg(theme.suggestion).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(theme.suggestion)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" back", Style::default().fg(theme.inactive)),
         ])));
     } else {
         rows.push(DialogRow::text(Line::from(vec![
-            Span::styled("  ↑↓", Style::default().fg(theme.suggestion).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  ↑↓",
+                Style::default()
+                    .fg(theme.suggestion)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" navigate · ", Style::default().fg(theme.inactive)),
-            Span::styled("Enter", Style::default().fg(theme.suggestion).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default()
+                    .fg(theme.suggestion)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" select · ", Style::default().fg(theme.inactive)),
-            Span::styled("Esc", Style::default().fg(theme.suggestion).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(theme.suggestion)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" cancel", Style::default().fg(theme.inactive)),
         ])));
     }
@@ -1824,7 +1693,13 @@ fn render_settings_panel(frame: &mut Frame, state: &mut AppState, area: Rect) {
         };
 
         let value_str = match &entry.value {
-            SettingValue::Bool(v) => if *v { "✓ on".to_string() } else { "✗ off".to_string() },
+            SettingValue::Bool(v) => {
+                if *v {
+                    "✓ on".to_string()
+                } else {
+                    "✗ off".to_string()
+                }
+            }
             SettingValue::Choice { options, selected } => format!("◀ {} ▶", options[*selected]),
             SettingValue::Info(s) => s.clone(),
         };
@@ -1844,20 +1719,39 @@ fn render_settings_panel(frame: &mut Frame, state: &mut AppState, area: Rect) {
             Span::styled(padded_label, label_style),
             Span::styled(
                 value_str,
-                Style::default().fg(value_color).add_modifier(
-                    if is_selected { Modifier::BOLD } else { Modifier::empty() }
-                ),
+                Style::default()
+                    .fg(value_color)
+                    .add_modifier(if is_selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
             ),
         ])));
     }
 
     rows.push(DialogRow::blank());
     rows.push(DialogRow::text(Line::from(vec![
-        Span::styled("  ↑↓", Style::default().fg(theme.suggestion).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "  ↑↓",
+            Style::default()
+                .fg(theme.suggestion)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" navigate · ", Style::default().fg(theme.inactive)),
-        Span::styled("Enter/←→", Style::default().fg(theme.suggestion).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Enter/←→",
+            Style::default()
+                .fg(theme.suggestion)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" change · ", Style::default().fg(theme.inactive)),
-        Span::styled("Esc", Style::default().fg(theme.suggestion).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Esc",
+            Style::default()
+                .fg(theme.suggestion)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" close ", Style::default().fg(theme.inactive)),
     ])));
 
@@ -2200,7 +2094,9 @@ fn render_session_picker(frame: &mut Frame, state: &mut AppState, area: Rect) {
         };
 
         let style = if is_selected {
-            Style::default().fg(theme.suggestion).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.suggestion)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.text)
         };

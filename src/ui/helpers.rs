@@ -1,8 +1,6 @@
-use ratatui::text::Line;
-use ratatui::text::Span;
-use ratatui::style::{Color, Modifier, Style};
-use unicode_width::UnicodeWidthStr;
 use crate::theme::Theme;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Span;
 
 pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -38,24 +36,6 @@ pub const CLAWD_ART: &[&str] = &[
     "█████▓▓▓▓▓▓▓▒▒▒▒░░░▒▒▒▓░░░▒▒▓▓▓▓▓▓▓▓▓▓▓▓",
     "█████▓▓██▓▓▓▓▓▓▓▒▒░░▒▓▓▒░░░▓▓▓▓▓▓▓▓█▓▓██",
 ];
-
-/// Compute the number of terminal rows a list of Lines will occupy after word-wrap at `width`.
-pub fn wrapped_height(lines: &[Line], width: usize) -> usize {
-    if width == 0 {
-        return lines.len();
-    }
-    lines
-        .iter()
-        .map(|line| {
-            let display_width: usize = line.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
-            if display_width == 0 {
-                1
-            } else {
-                (display_width + width - 1) / width
-            }
-        })
-        .sum()
-}
 
 pub fn gradient_char(ch: char, pos: usize, total: usize, offset: f64) -> Span<'static> {
     let t = (pos as f64 / total.max(1) as f64 + offset) % 1.0;

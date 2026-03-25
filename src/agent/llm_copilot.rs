@@ -127,9 +127,9 @@ fn build_structured_messages(messages: &[LlmMessage]) -> Vec<Value> {
         }
     }
 
-    let did_explore = messages.iter().any(|m| {
-        matches!(m, LlmMessage::Assistant { tool_calls, .. } if !tool_calls.is_empty())
-    });
+    let did_explore = messages
+        .iter()
+        .any(|m| matches!(m, LlmMessage::Assistant { tool_calls, .. } if !tool_calls.is_empty()));
 
     if did_explore {
         summary.push_str("\n\nEXPLORATION RESULTS:\n");

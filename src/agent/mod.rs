@@ -51,6 +51,13 @@ pub enum AgentEvent {
     DirectAnswer(String),
     CopilotRateLimitUpdate(CopilotRateLimits),
     CopilotRequestUsed,
+    // Pending stream: agent indicates some text will be sent/available when model is ready
+    PendingStreamSet {
+        source: String,
+        text: String,
+        meta: Option<std::collections::HashMap<String, String>>,
+    },
+    PendingStreamClear,
     Done(String),
     Error(String),
 }
@@ -112,25 +119,37 @@ fn is_conversational(prompt: &str) -> bool {
 
 // ── Client construction ─────────────────────────────────────────────────────
 
-fn build_client(config: &HakariConfig, provider_override: &str) -> Result<Arc<dyn LlmClient>, String> {
+fn build_client(
+    config: &HakariConfig,
+    provider_override: &str,
+) -> Result<Arc<dyn LlmClient>, String> {
     let provider = if provider_override.is_empty() {
-        config.active_provider().map(|(name, _)| name.to_string()).unwrap_or_default()
+        config
+            .active_provider()
+            .map(|(name, _)| name.to_string())
+            .unwrap_or_default()
     } else {
         provider_override.to_string()
     };
 
     match provider.as_str() {
         "copilot" => {
-            let key = config.providers.get("copilot")
+            let key = config
+                .providers
+                .get("copilot")
                 .map(|p| p.api_key.as_str())
                 .unwrap_or("");
             if key.is_empty() {
-                return Err("No Copilot OAuth token. Use /connect to authenticate with GitHub.".into());
+                return Err(
+                    "No Copilot OAuth token. Use /connect to authenticate with GitHub.".into(),
+                );
             }
             Ok(Arc::new(CopilotLlm::new(key)))
         }
         "gemini" => {
-            let key = config.providers.get("gemini")
+            let key = config
+                .providers
+                .get("gemini")
                 .map(|p| p.api_key.as_str())
                 .unwrap_or("");
             if key.is_empty() {
@@ -215,22 +234,36 @@ pub async fn run_agent(
         match shizuka_client.generate(&model, &messages, &[]).await {
             Ok(resp) => {
                 if let Some(ref rl) = resp.rate_limits {
-                    let _ = tx.send(AgentEvent::CopilotRateLimitUpdate(CopilotRateLimits {
-                        total: rl.total, remaining: rl.remaining, reset_at: rl.reset_at,
-                    })).await;
+                    let _ = tx
+                        .send(AgentEvent::CopilotRateLimitUpdate(CopilotRateLimits {
+                            total: rl.total,
+                            remaining: rl.remaining,
+                            reset_at: rl.reset_at,
+                        }))
+                        .await;
                 }
                 if shizuka_client.provider_name() == "copilot" {
                     let _ = tx.send(AgentEvent::CopilotRequestUsed).await;
                 }
-                let answer = if resp.text.is_empty() { "Hey!".to_string() } else { resp.text };
-                let _ = tx.send(AgentEvent::ShizukaReady {
-                    preloaded: Vec::new(), referenced: Vec::new(),
-                    task_summary: "Conversational".into(), classification: "trivial".into(),
-                }).await;
+                let answer = if resp.text.is_empty() {
+                    "Hey!".to_string()
+                } else {
+                    resp.text
+                };
+                let _ = tx
+                    .send(AgentEvent::ShizukaReady {
+                        preloaded: Vec::new(),
+                        referenced: Vec::new(),
+                        task_summary: "Conversational".into(),
+                        classification: "trivial".into(),
+                    })
+                    .await;
                 let _ = tx.send(AgentEvent::DirectAnswer(answer.clone())).await;
                 let _ = tx.send(AgentEvent::Done(answer)).await;
             }
-            Err(e) => { let _ = tx.send(AgentEvent::Error(e)).await; }
+            Err(e) => {
+                let _ = tx.send(AgentEvent::Error(e)).await;
+            }
         }
         return;
     }
@@ -320,7 +353,9 @@ pub async fn run_agent(
         match build_client(&config, &nano_provider) {
             Ok(c) => c,
             Err(e) => {
-                let _ = tx.send(AgentEvent::Error(format!("Nano client error: {}", e))).await;
+                let _ = tx
+                    .send(AgentEvent::Error(format!("Nano client error: {}", e)))
+                    .await;
                 return;
             }
         }
