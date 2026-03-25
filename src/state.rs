@@ -78,6 +78,20 @@ pub struct AppState {
     pub dialog: DialogState,
     // Copilot usage tracking
     pub copilot_usage: CopilotUsage,
+    // Custom text selection (works with mouse capture for scroll + selection)
+    pub selection: Option<TextSelection>,
+    pub clipboard_pending: bool,
+    pub clipboard_text: Option<String>,
+}
+
+/// Custom text selection state — tracks mouse drag for selecting text on screen.
+pub struct TextSelection {
+    /// Screen position where mouse was first pressed (col, row)
+    pub anchor: (u16, u16),
+    /// Current drag endpoint
+    pub end: (u16, u16),
+    /// True once a drag has occurred (distinguishes click from selection)
+    pub active: bool,
 }
 
 #[allow(dead_code)]
@@ -167,6 +181,9 @@ impl AppState {
             model_picker_target: String::new(),
             dialog: DialogState::new(),
             copilot_usage: CopilotUsage::default(),
+            selection: None,
+            clipboard_pending: false,
+            clipboard_text: None,
         }
     }
 

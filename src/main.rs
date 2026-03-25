@@ -28,6 +28,7 @@ mod state;
 mod ui;
 
 use std::io;
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -52,19 +53,9 @@ async fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let resume = args.iter().any(|a| a == "--resume" || a == "-r");
 
-    // Allow terminal text selection by default. Enable mouse capture only if
-    // HAKARI_CAPTURE_MOUSE environment variable is set to "1" or "true".
-    let mouse_capture = std::env::var("HAKARI_CAPTURE_MOUSE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    if mouse_capture {
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    } else {
-        execute!(stdout, EnterAlternateScreen)?;
-    }
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
     let _ = execute!(
         stdout,
@@ -81,22 +72,12 @@ async fn main() -> io::Result<()> {
     let result = run_app(&mut terminal, resume).await;
 
     disable_raw_mode()?;
-    // Only disable mouse capture if we previously enabled it to avoid altering
-    // terminal state unexpectedly.
-    if mouse_capture {
-        execute!(
-            terminal.backend_mut(),
-            PopKeyboardEnhancementFlags,
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
-    } else {
-        execute!(
-            terminal.backend_mut(),
-            PopKeyboardEnhancementFlags,
-            LeaveAlternateScreen
-        )?;
-    }
+    execute!(
+        terminal.backend_mut(),
+        PopKeyboardEnhancementFlags,
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     if let Err(err) = result {
@@ -145,6 +126,14 @@ async fn run_app(
         terminal.draw(|frame| {
             ui::render(frame, &mut state);
         })?;
+
+        // Copy selected text to clipboard (extracted during render)
+        if let Some(text) = state.clipboard_text.take() {
+            if !text.is_empty() {
+                copy_to_clipboard(&text);
+            }
+            state.selection = None;
+        }
 
         if state.should_quit {
             return Ok(());
@@ -281,6 +270,22 @@ fn spawn_agent(state: &mut AppState, text: &str, tx: mpsc::Sender<AgentEvent>) {
     tokio::spawn(async move {
         agent::run_agent(prompt, project_root, config, tx, cancel_rx).await;
     });
+}
+
+fn copy_to_clipboard(text: &str) {
+    use std::process::{Command, Stdio};
+    if let Ok(mut child) = Command::new("clip")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        if let Some(ref mut stdin) = child.stdin {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        drop(child.stdin.take());
+        let _ = child.wait();
+    }
 }
 
 fn spawn_connection_test(

@@ -1,4 +1,4 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
 
 use crate::config::{ConnectPhase, ConnectState};
@@ -27,70 +27,88 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) -> AppAction {
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             state.user_scrolled = true;
-            // Jump to the start of the previous message.
-            let target = state.message_row_starts
-                .iter()
-                .rev()
-                .find(|&&row| row < state.scroll_offset)
-                .copied()
-                .unwrap_or(0);
-            state.scroll_offset = target;
+            state.scroll_offset = state.scroll_offset.saturating_sub(3);
             AppAction::Redraw
         }
         MouseEventKind::ScrollDown => {
             let max = state.total_message_lines;
-            // Jump to the start of the next message.
-            let target = state.message_row_starts
-                .iter()
-                .find(|&&row| row > state.scroll_offset)
-                .copied()
-                .unwrap_or(max);
-            if target >= max {
+            if state.scroll_offset + 3 >= max {
                 state.scroll_offset = max;
                 state.user_scrolled = false;
             } else {
-                state.scroll_offset = target;
+                state.scroll_offset += 3;
             }
             AppAction::Redraw
         }
-        MouseEventKind::Down(_) => {
-            // Check if click lands on a ShizukaBlock header row to toggle collapse
-            let click_row = mouse.row as usize;
-            let scroll = state.scroll_offset;
-            let mut toggled = false;
-            for (msg_idx, msg) in state.messages.iter_mut().enumerate() {
-                for content in msg.content.iter_mut() {
-                    if let MessageContent::ShizukaBlock {
-                        ref mut collapsed, ..
-                    } = content
-                    {
-                        if let Some(&block_row) = state.shizuka_block_rows.get(&msg_idx) {
-                            let rendered_row = block_row.saturating_sub(scroll);
-                            // Header spans 1 line; allow clicking on it
-                            if click_row == rendered_row || click_row == rendered_row + 1 {
-                                *collapsed = !*collapsed;
-                                toggled = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if toggled {
-                    break;
-                }
+        MouseEventKind::Down(MouseButton::Left) => {
+            // Start potential selection (clear any existing)
+            state.selection = Some(crate::state::TextSelection {
+                anchor: (mouse.column, mouse.row),
+                end: (mouse.column, mouse.row),
+                active: false,
+            });
+            AppAction::None
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(ref mut sel) = state.selection {
+                sel.active = true;
+                sel.end = (mouse.column, mouse.row);
             }
-            if toggled {
+            AppAction::Redraw
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let was_selecting = state.selection.as_ref().map_or(false, |s| s.active);
+            if was_selecting {
+                // Selection stays visible — user can Ctrl+C to copy
                 AppAction::Redraw
             } else {
-                AppAction::None
+                // It was a plain click — handle ShizukaBlock collapse toggle
+                state.selection = None;
+                handle_click(state, mouse.column, mouse.row)
             }
         }
         _ => AppAction::None,
     }
 }
 
+fn handle_click(state: &mut AppState, _col: u16, row: u16) -> AppAction {
+    let click_row = row as usize;
+    let scroll = state.scroll_offset;
+    let mut toggled = false;
+    for (msg_idx, msg) in state.messages.iter_mut().enumerate() {
+        for content in msg.content.iter_mut() {
+            if let MessageContent::ShizukaBlock {
+                ref mut collapsed, ..
+            } = content
+            {
+                if let Some(&block_row) = state.shizuka_block_rows.get(&msg_idx) {
+                    let rendered_row = block_row.saturating_sub(scroll);
+                    if click_row == rendered_row || click_row == rendered_row + 1 {
+                        *collapsed = !*collapsed;
+                        toggled = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if toggled {
+            break;
+        }
+    }
+    if toggled {
+        AppAction::Redraw
+    } else {
+        AppAction::None
+    }
+}
+
 fn handle_key(state: &mut AppState, key: KeyEvent) -> AppAction {
+    // Ctrl+C with active selection → copy and deselect
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if state.selection.as_ref().map_or(false, |s| s.active) {
+            state.clipboard_pending = true;
+            return AppAction::Redraw;
+        }
         if state.agent_phase != AgentPhase::Idle {
             // Cancel running agent
             if let Some(ref tx) = state.agent_cancel_tx {
@@ -115,6 +133,11 @@ fn handle_key(state: &mut AppState, key: KeyEvent) -> AppAction {
             return AppAction::Redraw;
         }
         return AppAction::Quit;
+    }
+
+    // Any other keypress clears an active selection
+    if state.selection.as_ref().map_or(false, |s| s.active) {
+        state.selection = None;
     }
 
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {

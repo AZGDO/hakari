@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -8,6 +8,8 @@ use ratatui::{
     },
     Frame,
 };
+
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::ConnectPhase;
 use crate::dialog::{render_dialog, DialogConfig, DialogRow};
@@ -25,11 +27,11 @@ fn wrapped_height(lines: &[Line], width: usize) -> usize {
     lines
         .iter()
         .map(|line| {
-            let char_count: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-            if char_count == 0 {
+            let display_width: usize = line.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+            if display_width == 0 {
                 1
             } else {
-                (char_count + width - 1) / width
+                (display_width + width - 1) / width
             }
         })
         .sum()
@@ -114,6 +116,65 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     if state.mode == AppMode::SessionPicker {
         render_session_picker(frame, state, area);
     }
+
+    // Custom text selection: highlight + extract
+    render_selection(frame, state);
+}
+
+/// Normalize selection so start ≤ end in reading order.
+fn normalize_selection(a: (u16, u16), b: (u16, u16)) -> ((u16, u16), (u16, u16)) {
+    if a.1 < b.1 || (a.1 == b.1 && a.0 <= b.0) {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn render_selection(frame: &mut Frame, state: &mut AppState) {
+    let sel = match state.selection {
+        Some(ref s) if s.active => s,
+        _ => return,
+    };
+
+    let (start, end) = normalize_selection(sel.anchor, sel.end);
+    let buf = frame.buffer_mut();
+    let w = buf.area.width;
+
+    // Apply highlight and optionally extract text
+    let extracting = state.clipboard_pending;
+    let mut extracted = if extracting { Some(String::new()) } else { None };
+
+    for row in start.1..=end.1 {
+        let col_start = if row == start.1 { start.0 } else { 0 };
+        let col_end = if row == end.1 { end.0 } else { w.saturating_sub(1) };
+
+        let mut line_text = String::new();
+        for col in col_start..=col_end {
+            if let Some(cell) = buf.cell_mut(Position::new(col, row)) {
+                // Highlight: swap fg/bg
+                let fg = cell.fg;
+                let bg = cell.bg;
+                cell.set_fg(if bg == Color::Reset { Color::Black } else { bg });
+                cell.set_bg(if fg == Color::Reset { Color::White } else { fg });
+
+                if extracting {
+                    line_text.push_str(cell.symbol());
+                }
+            }
+        }
+
+        if let Some(ref mut text) = extracted {
+            text.push_str(line_text.trim_end());
+            if row < end.1 {
+                text.push('\n');
+            }
+        }
+    }
+
+    if let Some(text) = extracted {
+        state.clipboard_text = Some(text);
+        state.clipboard_pending = false;
+    }
 }
 
 fn gradient_char(ch: char, pos: usize, total: usize, offset: f64) -> Span<'static> {
@@ -137,7 +198,7 @@ fn gradient_char(ch: char, pos: usize, total: usize, offset: f64) -> Span<'stati
     )
 }
 
-fn get_input_height(state: &AppState, area_width: u16, is_busy: bool) -> u16 {
+pub fn get_input_height(state: &AppState, area_width: u16, is_busy: bool) -> u16 {
     if is_busy {
         return 1;
     }
@@ -188,7 +249,7 @@ fn render_welcome_screen(frame: &mut Frame, state: &AppState, area: Rect) {
     render_status_bar(frame, state, status_area);
 }
 
-fn render_welcome_box(frame: &mut Frame, state: &AppState, area: Rect) {
+pub fn render_welcome_box(frame: &mut Frame, state: &AppState, area: Rect) {
     let theme = &state.theme;
 
     // art width = 40 chars + 2 border + 2 padding
@@ -338,7 +399,7 @@ fn render_input_with_rules(
     let is_busy = state.is_loading || state.streaming.is_some() || state.pending_stream.is_some();
     let prompt_char = if is_busy { "↯" } else { "❯" };
     let prompt_color = if is_busy { theme.claude } else { theme.text };
-    let prompt_width: u16 = 2;
+    let _prompt_width: u16 = 2;
 
     // Mode indicator on the right
     let mode_indicator = match &state.permission_mode {
@@ -352,22 +413,6 @@ fn render_input_with_rules(
 
     // Split input into lines
 
-    let is_busy = state.is_loading || state.streaming.is_some() || state.pending_stream.is_some();
-    let prompt_char = if is_busy { "↯" } else { "❯" };
-    let prompt_color = if is_busy { theme.claude } else { theme.text };
-    let prompt_width: u16 = 2;
-
-    // Mode indicator on the right
-    let mode_indicator = match &state.permission_mode {
-        PermissionMode::Default => None,
-        mode => Some((mode.symbol(), mode.short_title(), mode_color(mode, theme))),
-    };
-    let indicator_width = mode_indicator
-        .as_ref()
-        .map(|(sym, title, _)| format!("{} {}  ", sym, title).len() as u16)
-        .unwrap_or(0);
-
-    // Split input into lines
     let input_lines: Vec<&str> = state.input.split('\n').collect();
 
     // Compute (cursor_row, cursor_col) from flat cursor_pos (logical coordinates)
@@ -444,55 +489,68 @@ fn render_input_with_rules(
     // Cursor: compute visual coordinates accounting for wrapping and prompt/indent
     if !is_busy {
         let area_w = input_area.width as usize;
-        let pw = prompt_width as usize;
+        // effective width respects the mode indicator on the right
+        let eff_w = area_w.saturating_sub(indicator_width as usize).max(1);
+        // compute actual prompt width (prompt + trailing space)
+        let prompt_prefix = format!("{} ", prompt_char);
+        let pw = UnicodeWidthStr::width(prompt_prefix.as_str());
         // width available for text on the first logical line (after prompt)
-        let first_w = area_w.saturating_sub(pw).max(1);
+        let first_w = eff_w.saturating_sub(pw).max(1);
         // width available for subsequent logical lines (after indent "  ")
-        let indent_w = 2usize;
-        let sub_w = area_w.saturating_sub(indent_w).max(1);
+        let indent_w = UnicodeWidthStr::width("  ");
+        let sub_w = eff_w.saturating_sub(indent_w).max(1);
+
+        // helpers
+        fn visual_width_str(s: &str) -> usize {
+            s.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum()
+        }
+        fn visual_lines_for_line(line: &str, first_w: usize, sub_w: usize, is_first: bool) -> usize {
+            let total = visual_width_str(line);
+            if total == 0 {
+                1
+            } else if is_first {
+                if total <= first_w {
+                    1
+                } else {
+                    1 + ((total.saturating_sub(first_w) + sub_w - 1) / sub_w)
+                }
+            } else {
+                (total + sub_w - 1) / sub_w
+            }
+        }
+        fn compute_visual_cursor(line: &str, logical_col: usize, first_w: usize, sub_w: usize, is_first: bool) -> (usize, usize) {
+            let mut curr_wrap = 0usize;
+            let mut curr_w = 0usize;
+            let mut limit = if is_first { first_w } else { sub_w };
+            for (idx, ch) in line.chars().enumerate() {
+                if idx >= logical_col {
+                    break;
+                }
+                let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if limit == 0 {
+                    limit = 1;
+                }
+                if curr_w + w > limit {
+                    curr_wrap += 1;
+                    curr_w = 0;
+                    limit = sub_w;
+                }
+                curr_w += w;
+            }
+            (curr_wrap, curr_w)
+        }
 
         let mut visual_row: usize = 0;
         let mut cursor_visual_col: usize = 0;
         let mut cursor_wrap_index: usize = 0; // which wrapped visual line within the logical line
 
         for (i, ln) in input_lines.iter().enumerate() {
-            let len = ln.chars().count();
             if i < cursor_row {
-                // add full visual lines for this logical line
-                if i == 0 {
-                    if len == 0 {
-                        visual_row += 1;
-                    } else {
-                        let rem = len.saturating_sub(first_w);
-                        visual_row += 1; // first visual line
-                        if rem > 0 {
-                            visual_row += (rem + sub_w - 1) / sub_w;
-                        }
-                    }
-                } else {
-                    if len == 0 {
-                        visual_row += 1;
-                    } else {
-                        visual_row += (len + sub_w - 1) / sub_w;
-                    }
-                }
+                visual_row += visual_lines_for_line(ln, first_w, sub_w, i == 0);
             } else if i == cursor_row {
-                // compute wrap index and visual col within the wrapped segment
-                if i == 0 {
-                    if cursor_col < first_w {
-                        cursor_wrap_index = 0;
-                        cursor_visual_col = cursor_col;
-                    } else {
-                        let rem = cursor_col.saturating_sub(first_w);
-                        cursor_wrap_index = 1 + (rem / sub_w);
-                        let prev_consumed = first_w + (cursor_wrap_index.saturating_sub(1) * sub_w);
-                        cursor_visual_col = cursor_col.saturating_sub(prev_consumed);
-                    }
-                } else {
-                    cursor_wrap_index = cursor_col / sub_w;
-                    let prev_consumed = cursor_wrap_index * sub_w;
-                    cursor_visual_col = cursor_col.saturating_sub(prev_consumed);
-                }
+                let (wrap_index, vis_col) = compute_visual_cursor(ln, cursor_col, first_w, sub_w, i == 0);
+                cursor_wrap_index = wrap_index;
+                cursor_visual_col = vis_col;
                 visual_row += cursor_wrap_index;
                 break;
             }
@@ -501,9 +559,9 @@ fn render_input_with_rules(
         // Determine absolute cursor X based on whether it's on the first visual line of its logical line
         let on_first_vis_of_line = cursor_wrap_index == 0;
         let x_base = if cursor_row == 0 && on_first_vis_of_line {
-            input_area.x + prompt_width
+            input_area.x + pw as u16
         } else {
-            input_area.x + 2 // indent for wrapped/subsequent lines
+            input_area.x + indent_w as u16 // indent for wrapped/subsequent lines
         };
         let cx = x_base + cursor_visual_col as u16;
         // Respect input_scroll: compute visible row relative to input_area
@@ -1197,7 +1255,7 @@ fn render_diff_block_lines<'a>(
     )]));
 }
 
-fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
+pub fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
     let theme = &state.theme;
     let is_copilot = state.config.is_copilot();
 
